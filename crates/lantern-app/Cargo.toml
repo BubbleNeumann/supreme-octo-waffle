@@ -6,3 +6,7 @@ edition.workspace = true
 [dependencies]
 iced.workspace = true
 lantern-service = { path = "../lantern-service" }
+rfd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

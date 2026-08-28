@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 lantern-core = { path = "../lantern-core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
