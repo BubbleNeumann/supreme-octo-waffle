@@ -1,0 +1,7 @@
+[package]
+name = "lantern-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lantern-store = { path = "../lantern-store" }

@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/lantern-core",
+    "crates/lantern-store",
+    "crates/lantern-service",
+    "crates/lantern-app",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+iced = { version = "0.14.0", default-features = false, features = [
+    "crisp",
+    "linux-theme-detection",
+    "thread-pool",
+    "tiny-skia",
+    "wayland",
+    "x11",
+] }
