@@ -5,7 +5,7 @@ use lantern_store::{ProjectStore, StoreError};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub use lantern_core::{Document, Project, ProjectEntry};
+pub use lantern_core::{Document, DocumentEncoding, LineEnding, Project, ProjectEntry};
 pub use lantern_store::FsProjectStore;
 
 /// Project-related application use-cases over an injected persistence adapter.
@@ -60,6 +60,29 @@ impl<S: ProjectStore> ProjectService<S> {
         }
 
         Ok(self.store.read_document(project, relative_path)?)
+    }
+
+    /// Saves edited text back over an open document.
+    ///
+    /// The document's original line endings and byte order mark are restored, so
+    /// that saving an unmodified buffer reproduces the file byte for byte.
+    pub fn save_document(
+        &self,
+        project: &Project,
+        document: &Document,
+        content: &str,
+    ) -> Result<(), ProjectServiceError> {
+        let relative_path = document.relative_path();
+
+        if !is_editable_document(relative_path) {
+            return Err(ProjectServiceError::UnsupportedDocument(
+                relative_path.to_owned(),
+            ));
+        }
+
+        Ok(self
+            .store
+            .save_document(project, relative_path, &document.encoding().apply(content))?)
     }
 }
 

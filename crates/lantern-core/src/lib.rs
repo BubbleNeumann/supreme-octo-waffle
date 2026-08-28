@@ -29,19 +29,116 @@ impl Project {
     }
 }
 
+/// The line terminator a document uses on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LineEnding {
+    /// A single line feed, used by Unix-like systems.
+    #[default]
+    Lf,
+    /// A carriage return followed by a line feed, used by Windows.
+    Crlf,
+}
+
+impl LineEnding {
+    /// Returns the terminator's characters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+}
+
+/// The byte-level conventions a document uses on disk.
+///
+/// Lantern normalizes documents for editing, so these conventions are recorded
+/// separately and restored on save. Without them, opening and saving a file
+/// authored on another platform would rewrite every line in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocumentEncoding {
+    line_ending: LineEnding,
+    byte_order_mark: bool,
+}
+
+impl DocumentEncoding {
+    /// Splits raw file text into its on-disk conventions and editable content.
+    ///
+    /// A leading byte order mark is removed and CRLF terminators become LF. The
+    /// terminator is taken from the first line break in the file, so a file with
+    /// mixed terminators is normalized to whichever convention it opens with.
+    pub fn detect(raw_content: &str) -> (Self, String) {
+        let (byte_order_mark, text) = match raw_content.strip_prefix('\u{feff}') {
+            Some(text) => (true, text),
+            None => (false, raw_content),
+        };
+
+        let line_ending = match text.find('\n') {
+            Some(index) if text[..index].ends_with('\r') => LineEnding::Crlf,
+            _ => LineEnding::Lf,
+        };
+
+        let content = match line_ending {
+            LineEnding::Lf => text.to_owned(),
+            LineEnding::Crlf => text.replace("\r\n", "\n"),
+        };
+
+        (
+            Self {
+                line_ending,
+                byte_order_mark,
+            },
+            content,
+        )
+    }
+
+    /// Restores the on-disk conventions around normalized editor text.
+    pub fn apply(&self, content: &str) -> String {
+        let body = match self.line_ending {
+            LineEnding::Lf => content.replace("\r\n", "\n"),
+            LineEnding::Crlf => content.replace("\r\n", "\n").replace('\n', "\r\n"),
+        };
+
+        if self.byte_order_mark {
+            let mut raw_content = String::with_capacity(body.len() + '\u{feff}'.len_utf8());
+            raw_content.push('\u{feff}');
+            raw_content.push_str(&body);
+            return raw_content;
+        }
+
+        body
+    }
+
+    /// Returns the document's line terminator.
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
+    /// Returns whether the document begins with a byte order mark.
+    pub fn has_byte_order_mark(&self) -> bool {
+        self.byte_order_mark
+    }
+}
+
 /// An opened human-authored text document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
     relative_path: PathBuf,
     content: String,
+    encoding: DocumentEncoding,
 }
 
 impl Document {
-    /// Creates a document from content and a project-relative path verified by storage.
-    pub fn from_verified_content(relative_path: PathBuf, content: String) -> Self {
+    /// Creates a document from raw file text and a project-relative path verified by storage.
+    ///
+    /// The text is normalized for editing and the file's original conventions are
+    /// retained so that saving reproduces them.
+    pub fn from_verified_content(relative_path: PathBuf, raw_content: String) -> Self {
+        let (encoding, content) = DocumentEncoding::detect(&raw_content);
+
         Self {
             relative_path,
             content,
+            encoding,
         }
     }
 
@@ -50,9 +147,14 @@ impl Document {
         &self.relative_path
     }
 
-    /// Returns the document text.
+    /// Returns the normalized document text.
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Returns the conventions to restore when saving this document.
+    pub fn encoding(&self) -> DocumentEncoding {
+        self.encoding
     }
 }
 
@@ -66,6 +168,9 @@ pub struct ProjectEntry {
 
 impl ProjectEntry {
     /// Creates an entry from a project-relative path verified by storage.
+    ///
+    /// `name` is a display string and may be lossy; `relative_path` must be the
+    /// exact path storage can resolve again.
     pub fn from_verified_path(
         relative_path: PathBuf,
         name: String,
@@ -83,7 +188,7 @@ impl ProjectEntry {
         &self.relative_path
     }
 
-    /// Returns the entry's file name.
+    /// Returns the entry's file name for display.
     pub fn name(&self) -> &str {
         &self.name
     }
