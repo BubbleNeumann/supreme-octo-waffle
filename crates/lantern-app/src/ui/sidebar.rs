@@ -27,6 +27,11 @@ pub(super) fn view(lantern: &Lantern) -> Element<'_, Message> {
         None => content,
     };
 
+    let content = match &lantern.theme_error {
+        Some(error) => content.push(text(format!("Theme error: {error}")).size(11)),
+        None => content,
+    };
+
     container(column![header(), scrollable(content).height(Fill)].spacing(10))
         .width(Length::Fixed(SIDEBAR_WIDTH))
         .height(Fill)

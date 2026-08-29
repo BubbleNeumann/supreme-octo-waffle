@@ -1,6 +1,10 @@
 //! Persistence interfaces and implementations for Lantern.
 
-use lantern_core::{Document, Project, ProjectEntry, ProjectEntryKind, ProjectName};
+mod theme;
+
+pub use theme::{FsThemeStore, ThemeStore};
+
+use lantern_core::{Document, Project, ProjectEntry, ProjectEntryKind, ProjectName, ThemeError};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -298,6 +302,34 @@ pub enum StoreError {
     /// A caller attempted to access outside the opened project.
     #[error("'{}' is not a safe project-relative path", .0.display())]
     UnsafeProjectPath(PathBuf),
+    /// A theme file could not be parsed as TOML.
+    #[error("'{}' is not valid TOML: {source}", path.display())]
+    ThemeSyntax {
+        /// Path of the theme file that could not be parsed.
+        path: PathBuf,
+        /// Underlying parse failure.
+        #[source]
+        source: toml::de::Error,
+    },
+    /// A theme file did not define an entry Lantern needs.
+    #[error("'{}' has no {key} entry", path.display())]
+    ThemeKeyMissing {
+        /// Path of the theme file that was incomplete.
+        path: PathBuf,
+        /// The table and key that were looked for.
+        key: String,
+    },
+    /// A theme file entry did not describe a usable colour.
+    #[error("'{}' entry {key}: {source}", path.display())]
+    ThemeColor {
+        /// Path of the theme file holding the entry.
+        path: PathBuf,
+        /// The table and key of the offending entry.
+        key: String,
+        /// Why the entry could not be resolved.
+        #[source]
+        source: ThemeError,
+    },
     /// The operating system rejected a filesystem operation.
     #[error("could not access '{}': {source}", path.display())]
     Io {

@@ -1,12 +1,15 @@
 //! Application use-cases and business rules for Lantern.
 
 use lantern_core::{ProjectName, ProjectNameError};
-use lantern_store::{ProjectStore, StoreError};
+use lantern_store::{ProjectStore, StoreError, ThemeStore};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub use lantern_core::{Document, DocumentEncoding, LineEnding, Project, ProjectEntry};
-pub use lantern_store::FsProjectStore;
+pub use lantern_core::{
+    Color, Document, DocumentEncoding, LineEnding, Project, ProjectEntry, Theme, ThemeMode,
+    ThemePalette,
+};
+pub use lantern_store::{FsProjectStore, FsThemeStore};
 
 /// Project-related application use-cases over an injected persistence adapter.
 #[derive(Debug)]
@@ -117,6 +120,55 @@ pub enum ProjectServiceError {
     #[error("'{}' is not an editable Markdown or text document", .0.display())]
     UnsupportedDocument(PathBuf),
     /// The persistence adapter could not complete the operation.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// Interface theme use-cases over an injected theme adapter.
+#[derive(Debug)]
+pub struct ThemeService<S> {
+    store: S,
+}
+
+impl<S> ThemeService<S> {
+    /// Creates a service using the provided theme adapter.
+    pub fn new(store: S) -> Self {
+        Self { store }
+    }
+}
+
+impl<S: ThemeStore> ThemeService<S> {
+    /// Lists the themes the interface can offer, ordered by name.
+    pub fn available_themes(&self) -> Result<Vec<Theme>, ThemeServiceError> {
+        Ok(self.store.list_themes()?)
+    }
+
+    /// Loads the theme with the given name.
+    pub fn theme(&self, name: &str) -> Result<Theme, ThemeServiceError> {
+        self.available_themes()?
+            .into_iter()
+            .find(|theme| theme.name() == name)
+            .ok_or_else(|| ThemeServiceError::UnknownTheme(name.to_owned()))
+    }
+}
+
+impl ThemeService<FsThemeStore> {
+    /// Creates the desktop service backed by theme files on disk.
+    pub fn filesystem(search_paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self::new(FsThemeStore::new(search_paths))
+    }
+}
+
+/// The desktop client's file-backed theme service type.
+pub type FsThemeService = ThemeService<FsThemeStore>;
+
+/// A failure while loading an interface theme.
+#[derive(Debug, Error)]
+pub enum ThemeServiceError {
+    /// No installed theme carries the requested name.
+    #[error("no theme named '{0}' is installed")]
+    UnknownTheme(String),
+    /// The theme adapter could not read the installed themes.
     #[error(transparent)]
     Store(#[from] StoreError),
 }

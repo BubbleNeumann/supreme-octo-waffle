@@ -1,0 +1,107 @@
+# Gruvbuddy theme for novelWriter
+# Ported from: https://github.com/tjdevries/gruvbuddy.nvim
+# Palette source: colors/gruvbuddy.lua
+#
+# novelWriter and Neovim expose different syntax roles, so the original
+# gruvbuddy colours are preserved while roles are mapped to the closest
+# novelWriter equivalents.
+
+[Main]
+name = "Gruvbuddy"
+mode = "dark"
+author = "novelWriter port of gruvbuddy.nvim"
+credit = "TJ DeVries — gruvbuddy.nvim"
+url = "https://github.com/tjdevries/gruvbuddy.nvim"
+
+[Base]
+base = "#111111"
+default = "#f2e5bc"
+faded = "#698b69"
+red = "#cc6666"
+orange = "#de935f"
+yellow = "#f8fe7a"
+green = "#99cc99"
+cyan = "#8abeb7"
+blue = "#81a2be"
+purple = "#8e6fbd"
+
+[Project]
+root = "blue"
+folder = "yellow"
+file = "default"
+title = "green"
+chapter = "#b294bb"
+scene = "blue"
+note = "orange"
+active = "green"
+inactive = "red"
+disabled = "faded"
+
+[Icon]
+tool = "default"
+sidebar = "default"
+accept = "green"
+reject = "red"
+action = "blue"
+option = "orange"
+apply = "green"
+create = "yellow"
+destroy = "faded"
+reset = "green"
+add = "green"
+change = "green"
+remove = "red"
+shortcode = "default"
+markdown = "orange"
+system = "yellow"
+info = "blue"
+warning = "orange"
+error = "red"
+
+[Palette]
+window = "base"
+windowText = "default"
+base = "base"
+alternateBase = "#282a2e"
+text = "default"
+tooltipBase = "#282a2e"
+tooltipText = "default"
+button = "#282a2e"
+buttonText = "default"
+brightText = "#f2e5bc"
+highlight = "blue"
+highlightedText = "base"
+link = "blue"
+linkVisited = "purple"
+accent = "blue"
+
+[GUI]
+helpText = "#8ec07c"
+fadedText = "faded"
+errorText = "red"
+toggle = "blue:128"
+searchMatch = "yellow:96"
+
+[Syntax]
+background = "base"
+text = "default"
+line = "default:32"
+link = "blue"
+headerText = "yellow"
+headerTag = "#b294bb"
+emphasis = "orange"
+whitespace = "faded:64"
+dialog = "blue"
+altDialog = "red"
+note = "yellow"
+hidden = "faded"
+shortcode = "blue"
+keyword = "#b294bb"
+tag = "blue"
+value = "orange"
+optional = "purple"
+spellCheckLine = "red"
+errorLine = "red"
+replaceTag = "green"
+modifier = "#b294bb"
+textHighlight = "yellow:72"

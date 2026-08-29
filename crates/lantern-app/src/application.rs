@@ -12,11 +12,14 @@ const DEFAULT_EDITOR_FONT_SIZE: f32 = 16.0;
 const MIN_EDITOR_FONT_SIZE: f32 = 10.0;
 const MAX_EDITOR_FONT_SIZE: f32 = 32.0;
 const FONT_ZOOM_STEP: f32 = 1.0;
+/// Drawn when no theme file can be read, so the window is never unstyled.
+const FALLBACK_THEME: iced::Theme = iced::Theme::Dark;
 
 pub(crate) fn run() -> iced::Result {
     iced::application(boot, update, crate::ui::view)
         .title(WINDOW_TITLE)
         .subscription(subscription)
+        .theme(theme)
         .window_size(WINDOW_SIZE)
         .centered()
         .exit_on_close_request(true)
@@ -38,6 +41,8 @@ pub(crate) struct Lantern {
     pub(crate) editor_redraw_epoch: bool,
     modifiers: keyboard::Modifiers,
     pub(crate) sidebar_collapsed: bool,
+    interface_theme: iced::Theme,
+    pub(crate) theme_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +64,13 @@ pub(crate) enum Message {
 fn boot() -> (Lantern, Task<Message>) {
     let editor_id = Id::unique();
     let focus_editor = operation::focus(editor_id.clone());
+    let (interface_theme, theme_error) =
+        match crate::theme::service().theme(crate::theme::DEFAULT_THEME) {
+            Ok(theme) => (crate::theme::to_iced(&theme), None),
+            // A missing or malformed theme must not stop Lantern from opening,
+            // so fall back to a built-in palette and say why in the sidebar.
+            Err(error) => (FALLBACK_THEME, Some(error.to_string())),
+        };
 
     (
         Lantern {
@@ -75,6 +87,8 @@ fn boot() -> (Lantern, Task<Message>) {
             editor_redraw_epoch: false,
             modifiers: keyboard::Modifiers::default(),
             sidebar_collapsed: false,
+            interface_theme,
+            theme_error,
         },
         focus_editor,
     )
@@ -259,6 +273,10 @@ fn load_visible_directories(lantern: &mut Lantern) {
             }
         }
     }
+}
+
+fn theme(lantern: &Lantern) -> iced::Theme {
+    lantern.interface_theme.clone()
 }
 
 fn subscription(_lantern: &Lantern) -> Subscription<Message> {

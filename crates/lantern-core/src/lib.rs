@@ -1,5 +1,9 @@
 //! Domain types and invariants shared across Lantern.
 
+pub mod theme;
+
+pub use theme::{BaseColors, Color, Theme, ThemeError, ThemeMode, ThemePalette};
+
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 

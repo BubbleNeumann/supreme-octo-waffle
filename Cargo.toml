@@ -23,6 +23,7 @@ iced = { version = "0.14.0", default-features = false, features = [
 rfd = "0.17.2"
 tempfile = "3"
 thiserror = "2.0"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
 
 # Lantern uses Iced's CPU renderer to keep idle memory low. Optimizing third-party
 # crates in development builds keeps scrolling responsive without making Lantern's
