@@ -1,7 +1,9 @@
+pub(crate) mod explorer;
+
+use explorer::Explorer;
 use iced::widget::{Id, operation, text_editor};
 use iced::{Event, Size, Subscription, Task, event, keyboard};
-use lantern_service::{FsProjectService, Project, ProjectEntry};
-use std::collections::{HashMap, HashSet};
+use lantern_service::{FsProjectService, Project};
 use std::path::{Path, PathBuf};
 
 const WINDOW_TITLE: &str = "Lantern";
@@ -25,9 +27,7 @@ pub(crate) fn run() -> iced::Result {
 pub(crate) struct Lantern {
     project_service: FsProjectService,
     pub(crate) project: Option<Project>,
-    directory_entries: HashMap<PathBuf, Vec<ProjectEntry>>,
-    expanded_directories: HashSet<PathBuf>,
-    pub(crate) project_tree: Vec<ProjectTreeRow>,
+    pub(crate) explorer: Explorer,
     pub(crate) open_document: Option<PathBuf>,
     pub(crate) project_error: Option<String>,
     pub(crate) creating_project: bool,
@@ -38,13 +38,6 @@ pub(crate) struct Lantern {
     pub(crate) editor_redraw_epoch: bool,
     modifiers: keyboard::Modifiers,
     pub(crate) sidebar_collapsed: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ProjectTreeRow {
-    pub(crate) entry: ProjectEntry,
-    pub(crate) depth: usize,
-    pub(crate) expanded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -71,9 +64,7 @@ fn boot() -> (Lantern, Task<Message>) {
         Lantern {
             project_service: FsProjectService::filesystem(),
             project: None,
-            directory_entries: HashMap::new(),
-            expanded_directories: HashSet::new(),
-            project_tree: Vec::new(),
+            explorer: Explorer::new(),
             open_document: None,
             project_error: None,
             creating_project: false,
@@ -109,30 +100,7 @@ fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
                 Message::ProjectParentPicked,
             );
         }
-        Message::Edit(action) => {
-            if let text_editor::Action::Scroll { lines } = action {
-                if lines == 0 {
-                    return Task::none();
-                }
-
-                if lantern.modifiers.control() {
-                    let zoom = -FONT_ZOOM_STEP * (lines as f32).signum();
-                    lantern.editor_font_size = (lantern.editor_font_size + zoom)
-                        .clamp(MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE);
-                } else {
-                    lantern
-                        .editor
-                        .perform(text_editor::Action::Scroll { lines });
-                }
-
-                // The tiny-skia compositor uses incremental damage tracking. An
-                // invisible, changing pane primitive makes the editor viewport's
-                // damage explicit and prevents stale pixels at its bottom edge.
-                lantern.editor_redraw_epoch = !lantern.editor_redraw_epoch;
-            } else {
-                lantern.editor.perform(action);
-            }
-        }
+        Message::Edit(action) => edit_document(lantern, action),
         Message::ModifiersChanged(modifiers) => lantern.modifiers = modifiers,
         Message::NewProjectNameChanged(name) => lantern.new_project_name = name,
         Message::OpenDocument(relative_path) => {
@@ -177,6 +145,32 @@ async fn pick_folder(title: &'static str) -> Option<PathBuf> {
         .map(|folder| folder.path().to_owned())
 }
 
+fn edit_document(lantern: &mut Lantern, action: text_editor::Action) {
+    let text_editor::Action::Scroll { lines } = action else {
+        lantern.editor.perform(action);
+        return;
+    };
+
+    if lines == 0 {
+        return;
+    }
+
+    if lantern.modifiers.control() {
+        let zoom = -FONT_ZOOM_STEP * (lines as f32).signum();
+        lantern.editor_font_size =
+            (lantern.editor_font_size + zoom).clamp(MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE);
+    } else {
+        lantern
+            .editor
+            .perform(text_editor::Action::Scroll { lines });
+    }
+
+    // The tiny-skia compositor uses incremental damage tracking. An invisible,
+    // changing pane primitive makes the editor viewport's damage explicit and
+    // prevents stale pixels at its bottom edge.
+    lantern.editor_redraw_epoch = !lantern.editor_redraw_epoch;
+}
+
 fn apply_project_result(
     lantern: &mut Lantern,
     result: Result<Project, lantern_service::ProjectServiceError>,
@@ -188,19 +182,18 @@ fn apply_project_result(
                 .list_directory(&project, Path::new(""));
 
             lantern.project = Some(project);
-            lantern.directory_entries.clear();
-            lantern.expanded_directories.clear();
-            lantern.project_tree.clear();
             lantern.open_document = None;
             lantern.editor = text_editor::Content::new();
 
             match root_entries {
                 Ok(entries) => {
-                    lantern.directory_entries.insert(PathBuf::new(), entries);
+                    lantern.explorer.reset(entries);
                     lantern.project_error = None;
-                    rebuild_project_tree(lantern);
                 }
-                Err(error) => lantern.project_error = Some(error.to_string()),
+                Err(error) => {
+                    lantern.explorer.clear();
+                    lantern.project_error = Some(error.to_string());
+                }
             }
 
             lantern.creating_project = false;
@@ -233,77 +226,37 @@ fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {
 }
 
 fn toggle_project_directory(lantern: &mut Lantern, relative_path: PathBuf) {
-    if lantern.expanded_directories.remove(&relative_path) {
-        rebuild_project_tree(lantern);
+    if lantern.explorer.is_expanded(&relative_path) {
+        lantern.explorer.collapse(&relative_path);
         return;
     }
 
-    if !lantern.directory_entries.contains_key(&relative_path) {
-        let Some(project) = lantern.project.as_ref() else {
-            return;
-        };
-
-        match lantern
-            .project_service
-            .list_directory(project, &relative_path)
-        {
-            Ok(entries) => {
-                lantern
-                    .directory_entries
-                    .insert(relative_path.clone(), entries);
-                lantern.project_error = None;
-            }
-            Err(error) => {
-                lantern.project_error = Some(error.to_string());
-                return;
-            }
-        }
-    }
-
-    lantern.expanded_directories.insert(relative_path);
-    rebuild_project_tree(lantern);
+    lantern.explorer.expand(relative_path);
+    load_visible_directories(lantern);
 }
 
-fn rebuild_project_tree(lantern: &mut Lantern) {
-    let mut project_tree = Vec::new();
-    append_visible_entries(
-        &lantern.directory_entries,
-        &lantern.expanded_directories,
-        Path::new(""),
-        0,
-        &mut project_tree,
-    );
-    lantern.project_tree = project_tree;
-}
-
-fn append_visible_entries(
-    directory_entries: &HashMap<PathBuf, Vec<ProjectEntry>>,
-    expanded_directories: &HashSet<PathBuf>,
-    directory: &Path,
-    depth: usize,
-    project_tree: &mut Vec<ProjectTreeRow>,
-) {
-    let Some(entries) = directory_entries.get(directory) else {
+/// Reads every expanded directory the explorer shows without a listing.
+///
+/// Collapsing releases the listings underneath a directory, so re-expanding it
+/// reads back the subtree that its surviving expansion markers describe.
+fn load_visible_directories(lantern: &mut Lantern) {
+    let Some(project) = lantern.project.as_ref() else {
         return;
     };
 
-    for entry in entries {
-        let expanded = entry.is_directory() && expanded_directories.contains(entry.relative_path());
-
-        project_tree.push(ProjectTreeRow {
-            entry: entry.clone(),
-            depth,
-            expanded,
-        });
-
-        if expanded {
-            append_visible_entries(
-                directory_entries,
-                expanded_directories,
-                entry.relative_path(),
-                depth + 1,
-                project_tree,
-            );
+    while let Some(directory) = lantern.explorer.next_unlisted_directory() {
+        match lantern.project_service.list_directory(project, &directory) {
+            Ok(entries) => {
+                lantern.explorer.insert_listing(directory, entries);
+                lantern.project_error = None;
+            }
+            Err(error) => {
+                // Leaving it expanded would ask for the same failing listing
+                // again on every later expansion.
+                lantern.explorer.collapse(&directory);
+                lantern.project_error = Some(error.to_string());
+                return;
+            }
         }
     }
 }
