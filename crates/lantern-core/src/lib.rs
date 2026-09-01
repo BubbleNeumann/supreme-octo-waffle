@@ -160,6 +160,22 @@ impl Document {
     pub fn encoding(&self) -> DocumentEncoding {
         self.encoding
     }
+
+    /// Returns whether `content` differs from the text this document holds.
+    ///
+    /// The document's text mirrors what was last read from or written to
+    /// storage, so this answers whether saving `content` would change the file.
+    pub fn differs_from(&self, content: &str) -> bool {
+        self.content != content
+    }
+
+    /// Adopts text that storage has written as the document's own content.
+    ///
+    /// Saving does not otherwise change a document, so without this the
+    /// in-memory copy would drift from the file it describes.
+    pub fn record_saved(&mut self, content: String) {
+        self.content = content;
+    }
 }
 
 /// One file or directory displayed in a project's explorer.

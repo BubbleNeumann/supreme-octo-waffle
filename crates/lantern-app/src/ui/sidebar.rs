@@ -3,6 +3,7 @@ use crate::application::explorer::ExplorerRow;
 use crate::application::{Lantern, Message};
 use iced::widget::{button, column, container, row, scrollable, space, text, text_input};
 use iced::{Element, Fill, Length, alignment};
+use std::borrow::Cow;
 use std::path::Path;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -10,6 +11,8 @@ const COLLAPSED_SIDEBAR_WIDTH: f32 = 24.0;
 const SIDEBAR_HEADER_HEIGHT: f32 = 32.0;
 const INDENTATION_PER_LEVEL: f32 = 14.0;
 const DISCLOSURE_WIDTH: f32 = 14.0;
+/// Follows the open document's name while it holds edits that are not on disk.
+const UNSAVED_MARKER: &str = " \u{2022}";
 
 pub(super) fn view(lantern: &Lantern) -> Element<'_, Message> {
     if lantern.sidebar_collapsed {
@@ -83,7 +86,11 @@ fn project_content(lantern: &Lantern) -> iced::widget::Column<'_, Message> {
     }
 
     for row in lantern.explorer.visible_rows() {
-        content = content.push(entry_row(row, lantern.open_document.as_deref()));
+        content = content.push(entry_row(
+            row,
+            lantern.open_document_path(),
+            lantern.unsaved_edits,
+        ));
     }
 
     content
@@ -136,6 +143,7 @@ fn no_project_content(lantern: &Lantern) -> iced::widget::Column<'_, Message> {
 fn entry_row<'a>(
     explorer_row: ExplorerRow<'a>,
     open_document: Option<&'a Path>,
+    unsaved_edits: bool,
 ) -> Element<'a, Message> {
     let entry = explorer_row.entry;
     let indentation = space().width(Length::Fixed(
@@ -160,11 +168,16 @@ fn entry_row<'a>(
     }
 
     let selected = open_document == Some(entry.relative_path());
+    let name: Cow<'a, str> = if selected && unsaved_edits {
+        format!("{}{UNSAVED_MARKER}", entry.name()).into()
+    } else {
+        entry.name().into()
+    };
 
     button(row![
         indentation,
         space().width(Length::Fixed(DISCLOSURE_WIDTH)),
-        text(entry.name()).size(13),
+        text(name).size(13),
     ])
     .width(Fill)
     .padding([3, 0])

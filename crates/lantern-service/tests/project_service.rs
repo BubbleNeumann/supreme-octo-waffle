@@ -46,12 +46,13 @@ fn saving_an_unedited_document_reproduces_the_original_bytes() {
     let project = service
         .open_project(directory.path())
         .expect("project should open");
-    let document = service
+    let mut document = service
         .open_document(&project, Path::new("chapter.md"))
         .expect("document should open");
+    let unedited = document.content().to_owned();
 
     service
-        .save_document(&project, &document, document.content())
+        .save_document(&project, &mut document, &unedited)
         .expect("document should save");
 
     assert_eq!(std::fs::read_to_string(&path).expect("read back"), original);
@@ -66,16 +67,59 @@ fn saving_edited_text_keeps_the_original_conventions() {
     let project = service
         .open_project(directory.path())
         .expect("project should open");
-    let document = service
+    let mut document = service
         .open_document(&project, Path::new("chapter.md"))
         .expect("document should open");
 
     service
-        .save_document(&project, &document, "One\nTwo\nThree\n")
+        .save_document(&project, &mut document, "One\nTwo\nThree\n")
         .expect("document should save");
 
     assert_eq!(
         std::fs::read_to_string(&path).expect("read back"),
         "One\r\nTwo\r\nThree\r\n"
     );
+}
+
+#[test]
+fn a_saved_document_stops_reporting_the_text_it_kept_as_a_change() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("chapter.md"), "One\n").expect("document file");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    let mut document = service
+        .open_document(&project, Path::new("chapter.md"))
+        .expect("document should open");
+    assert!(document.differs_from("One\nTwo\n"));
+
+    service
+        .save_document(&project, &mut document, "One\nTwo\n")
+        .expect("document should save");
+
+    assert_eq!(document.content(), "One\nTwo\n");
+    assert!(!document.differs_from("One\nTwo\n"));
+}
+
+#[test]
+fn a_failed_save_leaves_the_document_describing_the_file_on_disk() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One\n").expect("document file");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    let mut document = service
+        .open_document(&project, Path::new("chapter.md"))
+        .expect("document should open");
+    std::fs::remove_file(&path).expect("remove document");
+
+    assert!(
+        service
+            .save_document(&project, &mut document, "One\nTwo\n")
+            .is_err()
+    );
+    assert_eq!(document.content(), "One\n");
 }

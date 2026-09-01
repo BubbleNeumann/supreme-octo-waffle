@@ -155,10 +155,7 @@ fn clicking_a_document_loads_it_into_the_editor() {
     ));
 
     assert_eq!(lantern.editor.text(), "A beginning");
-    assert_eq!(
-        lantern.open_document.as_deref(),
-        Some(Path::new("chapter.md"))
-    );
+    assert_eq!(lantern.open_document_path(), Some(Path::new("chapter.md")));
     assert!(lantern.project_error.is_none());
 }
 
@@ -183,10 +180,7 @@ fn an_unsupported_file_does_not_replace_the_open_document() {
     ));
 
     assert_eq!(lantern.editor.text(), "Keep me");
-    assert_eq!(
-        lantern.open_document.as_deref(),
-        Some(Path::new("chapter.txt"))
-    );
+    assert_eq!(lantern.open_document_path(), Some(Path::new("chapter.txt")));
     assert!(lantern.project_error.is_some());
 }
 
@@ -318,4 +312,206 @@ fn a_directory_that_disappeared_while_collapsed_does_not_stay_expanded() {
 
     assert!(!lantern.explorer.is_expanded(Path::new("chapters")));
     assert!(lantern.project_error.is_some());
+}
+
+/// Opens `directory` as a project with `relative_path` in the editor.
+fn open_project_document(directory: &Path, relative_path: &str) -> Lantern {
+    let (mut lantern, _) = boot();
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(directory.to_owned())),
+    ));
+    drop(update(
+        &mut lantern,
+        Message::OpenDocument(PathBuf::from(relative_path)),
+    ));
+
+    lantern
+}
+
+/// Types `text` into the editor one character at a time.
+fn type_text(lantern: &mut Lantern, text: &str) {
+    for character in text.chars() {
+        drop(update(
+            lantern,
+            Message::Edit(text_editor::Action::Edit(text_editor::Edit::Insert(
+                character,
+            ))),
+        ));
+    }
+}
+
+#[test]
+fn saving_writes_the_edited_text_over_the_document() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    type_text(&mut lantern, "!");
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), "!One");
+    assert!(!lantern.unsaved_edits);
+    assert!(lantern.project_error.is_none());
+}
+
+#[test]
+fn an_edit_leaves_the_document_unsaved_until_it_is_written() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("chapter.md"), "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    assert!(!lantern.unsaved_edits);
+
+    type_text(&mut lantern, "!");
+    assert!(lantern.unsaved_edits);
+
+    drop(update(&mut lantern, Message::SaveDocument));
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn moving_around_the_document_does_not_make_it_unsaved() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("chapter.md"), "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+
+    drop(update(
+        &mut lantern,
+        Message::Edit(text_editor::Action::SelectAll),
+    ));
+    drop(update(
+        &mut lantern,
+        Message::Edit(text_editor::Action::Scroll { lines: 2 }),
+    ));
+
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn saving_an_unchanged_document_leaves_the_file_alone() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    // Written behind Lantern's back: a save that has nothing to store must not
+    // overwrite it with the buffer it already agrees with.
+    std::fs::write(&path, "Written elsewhere").expect("rewrite document");
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "Written elsewhere"
+    );
+}
+
+#[test]
+fn an_edit_that_is_undone_is_not_written_again() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    type_text(&mut lantern, "!");
+    drop(update(
+        &mut lantern,
+        Message::Edit(text_editor::Action::Edit(text_editor::Edit::Backspace)),
+    ));
+    std::fs::write(&path, "Written elsewhere").expect("rewrite document");
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "Written elsewhere"
+    );
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn saving_keeps_the_line_endings_the_document_was_opened_with() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One\r\nTwo\r\n").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    type_text(&mut lantern, "!");
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "!One\r\nTwo\r\n"
+    );
+}
+
+#[test]
+fn opening_another_document_saves_the_one_being_left() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let first = directory.path().join("one.md");
+    std::fs::write(&first, "One").expect("first document");
+    std::fs::write(directory.path().join("two.md"), "Two").expect("second document");
+    let mut lantern = open_project_document(directory.path(), "one.md");
+    type_text(&mut lantern, "!");
+
+    drop(update(
+        &mut lantern,
+        Message::OpenDocument(PathBuf::from("two.md")),
+    ));
+
+    assert_eq!(std::fs::read_to_string(&first).expect("read back"), "!One");
+    assert_eq!(lantern.editor.text(), "Two");
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn opening_another_project_saves_the_document_being_left() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One").expect("document file");
+    let other = tempfile::tempdir().expect("other temporary directory");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    type_text(&mut lantern, "!");
+
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(other.path().to_owned())),
+    ));
+
+    assert_eq!(std::fs::read_to_string(&path).expect("read back"), "!One");
+    assert!(lantern.open_document_path().is_none());
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn saving_without_an_open_document_does_nothing() {
+    let (mut lantern, _) = boot();
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert!(lantern.project_error.is_none());
+}
+
+#[test]
+fn a_document_that_disappeared_reports_the_failed_save_and_stays_unsaved() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("chapter.md");
+    std::fs::write(&path, "One").expect("document file");
+    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    type_text(&mut lantern, "!");
+    std::fs::remove_file(&path).expect("remove document");
+
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert!(lantern.project_error.is_some());
+    assert!(lantern.unsaved_edits);
+    assert_eq!(lantern.editor.text(), "!One");
+}
+
+#[test]
+fn the_autosave_ticker_keeps_asking_for_saves_until_it_is_dropped() {
+    let requests = save_requests(std::time::Duration::from_millis(20));
+    let mut requests = iced::futures::executor::block_on_stream(Box::pin(requests));
+
+    assert!(matches!(requests.next(), Some(Message::SaveDocument)));
+    assert!(matches!(requests.next(), Some(Message::SaveDocument)));
 }

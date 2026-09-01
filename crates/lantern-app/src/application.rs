@@ -1,10 +1,12 @@
 pub(crate) mod explorer;
 
 use explorer::Explorer;
+use iced::futures::Stream;
 use iced::widget::{Id, operation, text_editor};
-use iced::{Event, Size, Subscription, Task, event, keyboard};
-use lantern_service::{FsProjectService, Project};
+use iced::{Event, Size, Subscription, Task, event, keyboard, stream};
+use lantern_service::{Document, FsProjectService, Project};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const WINDOW_TITLE: &str = "Lantern";
 const WINDOW_SIZE: Size = Size::new(960.0, 640.0);
@@ -12,6 +14,8 @@ const DEFAULT_EDITOR_FONT_SIZE: f32 = 16.0;
 const MIN_EDITOR_FONT_SIZE: f32 = 10.0;
 const MAX_EDITOR_FONT_SIZE: f32 = 32.0;
 const FONT_ZOOM_STEP: f32 = 1.0;
+/// How long an edit may stay unwritten before autosave stores it.
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Drawn when no theme file can be read, so the window is never unstyled.
 const FALLBACK_THEME: iced::Theme = iced::Theme::Dark;
 
@@ -31,7 +35,8 @@ pub(crate) struct Lantern {
     project_service: FsProjectService,
     pub(crate) project: Option<Project>,
     pub(crate) explorer: Explorer,
-    pub(crate) open_document: Option<PathBuf>,
+    pub(crate) open_document: Option<Document>,
+    pub(crate) unsaved_edits: bool,
     pub(crate) project_error: Option<String>,
     pub(crate) creating_project: bool,
     pub(crate) new_project_name: String,
@@ -43,6 +48,13 @@ pub(crate) struct Lantern {
     pub(crate) sidebar_collapsed: bool,
     interface_theme: iced::Theme,
     pub(crate) theme_error: Option<String>,
+}
+
+impl Lantern {
+    /// Returns the project-relative path of the document being edited.
+    pub(crate) fn open_document_path(&self) -> Option<&Path> {
+        self.open_document.as_ref().map(Document::relative_path)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +69,7 @@ pub(crate) enum Message {
     OpenProject,
     OpenProjectFolderPicked(Option<PathBuf>),
     ProjectParentPicked(Option<PathBuf>),
+    SaveDocument,
     ToggleProjectDirectory(PathBuf),
     ToggleSidebar,
 }
@@ -78,6 +91,7 @@ fn boot() -> (Lantern, Task<Message>) {
             project: None,
             explorer: Explorer::new(),
             open_document: None,
+            unsaved_edits: false,
             project_error: None,
             creating_project: false,
             new_project_name: String::new(),
@@ -142,6 +156,7 @@ fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
             apply_project_result(lantern, result);
         }
         Message::ProjectParentPicked(None) => {}
+        Message::SaveDocument => save_open_document(lantern),
         Message::ToggleProjectDirectory(relative_path) => {
             toggle_project_directory(lantern, relative_path);
         }
@@ -161,6 +176,7 @@ async fn pick_folder(title: &'static str) -> Option<PathBuf> {
 
 fn edit_document(lantern: &mut Lantern, action: text_editor::Action) {
     let text_editor::Action::Scroll { lines } = action else {
+        lantern.unsaved_edits |= action.is_edit();
         lantern.editor.perform(action);
         return;
     };
@@ -191,12 +207,17 @@ fn apply_project_result(
 ) {
     match result {
         Ok(project) => {
+            // The document being edited belongs to the outgoing project, so it
+            // has to reach disk before that project is replaced.
+            save_open_document(lantern);
+
             let root_entries = lantern
                 .project_service
                 .list_directory(&project, Path::new(""));
 
             lantern.project = Some(project);
             lantern.open_document = None;
+            lantern.unsaved_edits = false;
             lantern.editor = text_editor::Content::new();
 
             match root_entries {
@@ -218,6 +239,10 @@ fn apply_project_result(
 }
 
 fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {
+    // Whatever is in the editor is about to be replaced, so it has to reach
+    // disk first; opening another document must not discard unsaved work.
+    save_open_document(lantern);
+
     let Some(project) = lantern.project.as_ref() else {
         return false;
     };
@@ -228,7 +253,8 @@ fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {
     {
         Ok(document) => {
             lantern.editor = text_editor::Content::with_text(document.content());
-            lantern.open_document = Some(document.relative_path().to_owned());
+            lantern.open_document = Some(document);
+            lantern.unsaved_edits = false;
             lantern.project_error = None;
             true
         }
@@ -236,6 +262,44 @@ fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {
             lantern.project_error = Some(error.to_string());
             false
         }
+    }
+}
+
+/// Writes the editor's text over the open document when the two differ.
+///
+/// Both Ctrl+S and autosave arrive here, so an explicit save and an automatic
+/// one leave exactly the same file behind. A buffer that matches the document
+/// is left alone rather than rewritten.
+fn save_open_document(lantern: &mut Lantern) {
+    if !lantern.unsaved_edits {
+        return;
+    }
+
+    let Some(project) = lantern.project.as_ref() else {
+        return;
+    };
+    let Some(document) = lantern.open_document.as_mut() else {
+        return;
+    };
+
+    let content = lantern.editor.text();
+
+    // Editing and then undoing leaves the buffer marked, but identical to the
+    // file; there is nothing to write.
+    if !document.differs_from(&content) {
+        lantern.unsaved_edits = false;
+        return;
+    }
+
+    match lantern
+        .project_service
+        .save_document(project, document, &content)
+    {
+        Ok(()) => {
+            lantern.unsaved_edits = false;
+            lantern.project_error = None;
+        }
+        Err(error) => lantern.project_error = Some(error.to_string()),
     }
 }
 
@@ -279,12 +343,65 @@ fn theme(lantern: &Lantern) -> iced::Theme {
     lantern.interface_theme.clone()
 }
 
-fn subscription(_lantern: &Lantern) -> Subscription<Message> {
-    event::listen_with(|event, _status, _window| match event {
+fn subscription(lantern: &Lantern) -> Subscription<Message> {
+    let mut subscriptions = vec![event::listen_with(|event, _status, _window| match event {
         Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
             Some(Message::ModifiersChanged(modifiers))
         }
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) => {
+            // `command` is Ctrl everywhere Lantern runs except macOS, where the
+            // same shortcut is written with the Command key. The key is read
+            // the way the editor reads its own shortcuts, so that Ctrl+S stays
+            // Ctrl+S on a keyboard layout that is not Latin.
+            (modifiers.command() && key.to_latin(physical_key) == Some('s'))
+                .then_some(Message::SaveDocument)
+        }
         _ => None,
+    })];
+
+    // Nothing can be autosaved without an open document, and the interval
+    // starts over with the next one that is opened.
+    if lantern.open_document.is_some() {
+        subscriptions.push(Subscription::run(autosave_ticks));
+    }
+
+    Subscription::batch(subscriptions)
+}
+
+/// Asks for a save every [`AUTOSAVE_INTERVAL`] for as long as it is listened to.
+fn autosave_ticks() -> impl Stream<Item = Message> {
+    save_requests(AUTOSAVE_INTERVAL)
+}
+
+/// Produces a save request every `interval` until the stream is dropped.
+///
+/// Lantern runs on the futures thread pool, which offers no timer, so the
+/// interval is kept by a thread that parks between ticks rather than by an
+/// async runtime the application would otherwise not need.
+fn save_requests(interval: Duration) -> impl Stream<Item = Message> {
+    stream::channel(1, async move |mut ticks| {
+        // Without a ticker there is no autosave; Ctrl+S still works, and the
+        // editor is no worse off than it would be for refusing to open.
+        let _ = std::thread::Builder::new()
+            .name("lantern-autosave".to_owned())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(interval);
+
+                    match ticks.try_send(Message::SaveDocument) {
+                        Ok(()) => {}
+                        // A tick is already waiting to be handled; one is enough.
+                        Err(error) if error.is_full() => {}
+                        // The subscription was dropped, so this thread is done.
+                        Err(_) => return,
+                    }
+                }
+            });
     })
 }
 

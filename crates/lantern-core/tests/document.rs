@@ -78,3 +78,32 @@ fn an_empty_document_saves_as_nothing() {
     assert_eq!(document.content(), "");
     assert_eq!(document.encoding().apply(""), "");
 }
+
+#[test]
+fn reports_only_text_that_would_change_the_file_as_a_change() {
+    let document = open("One\nTwo\n");
+
+    assert!(!document.differs_from("One\nTwo\n"));
+    assert!(document.differs_from("One\nTwo\nThree\n"));
+}
+
+#[test]
+fn a_document_that_records_a_save_compares_against_the_saved_text() {
+    let mut document = open("One\n");
+
+    document.record_saved("One\nTwo\n".to_owned());
+
+    assert_eq!(document.content(), "One\nTwo\n");
+    assert!(!document.differs_from("One\nTwo\n"));
+    assert!(document.differs_from("One\n"));
+}
+
+#[test]
+fn recording_a_save_leaves_the_on_disk_conventions_alone() {
+    let mut document = open("\u{feff}One\r\n");
+
+    document.record_saved("One\nTwo\n".to_owned());
+
+    assert!(document.encoding().has_byte_order_mark());
+    assert_eq!(document.encoding().line_ending(), LineEnding::Crlf);
+}

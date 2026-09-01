@@ -68,11 +68,13 @@ impl<S: ProjectStore> ProjectService<S> {
     /// Saves edited text back over an open document.
     ///
     /// The document's original line endings and byte order mark are restored, so
-    /// that saving an unmodified buffer reproduces the file byte for byte.
+    /// that saving an unmodified buffer reproduces the file byte for byte. A
+    /// document that saves successfully adopts `content` as its own text, so
+    /// that it keeps describing the file that is now on disk.
     pub fn save_document(
         &self,
         project: &Project,
-        document: &Document,
+        document: &mut Document,
         content: &str,
     ) -> Result<(), ProjectServiceError> {
         let relative_path = document.relative_path();
@@ -83,9 +85,11 @@ impl<S: ProjectStore> ProjectService<S> {
             ));
         }
 
-        Ok(self
-            .store
-            .save_document(project, relative_path, &document.encoding().apply(content))?)
+        self.store
+            .save_document(project, relative_path, &document.encoding().apply(content))?;
+        document.record_saved(content.to_owned());
+
+        Ok(())
     }
 }
 
