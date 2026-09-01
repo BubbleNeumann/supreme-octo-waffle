@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn the_editors_page_is_the_colour_the_window_is() {
+        let theme = shipped_theme();
+
+        // With no project open the pane holds no editor, so what shows through
+        // is the window's own background rather than the page the editor
+        // paints. They have to be the same colour, or opening a project would
+        // change the shade of the pane.
+        let window = iced::theme::Base::base(&theme).background_color;
+
+        assert_eq!(page_color(&shipped_editor_style()), window);
+    }
+
+    #[test]
     fn the_caret_itself_stays_visible_against_the_page() {
         let style = shipped_editor_style();
         let visibility = contrast(style.caret, page_color(&style));

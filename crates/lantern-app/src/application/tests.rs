@@ -582,3 +582,38 @@ fn the_autosave_ticker_keeps_asking_for_saves_until_it_is_dropped() {
     assert!(matches!(requests.next(), Some(Message::SaveDocument)));
     assert!(matches!(requests.next(), Some(Message::SaveDocument)));
 }
+
+#[test]
+fn the_editor_takes_no_writing_until_a_project_is_open() {
+    let (lantern, _) = boot();
+
+    assert!(!lantern.accepts_writing());
+}
+
+#[test]
+fn opening_a_project_lets_the_editor_be_written_in() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (mut lantern, _) = boot();
+
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(directory.path().to_owned())),
+    ));
+
+    assert!(lantern.accepts_writing());
+}
+
+#[test]
+fn a_project_that_fails_to_open_leaves_the_editor_inert() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("drawer"), "not a directory").expect("blocking file");
+    let (mut lantern, _) = boot();
+
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(directory.path().to_owned())),
+    ));
+
+    assert!(lantern.project_error.is_some());
+    assert!(!lantern.accepts_writing());
+}

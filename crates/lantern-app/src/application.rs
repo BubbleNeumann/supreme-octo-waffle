@@ -64,6 +64,16 @@ pub(crate) struct Lantern {
 }
 
 impl Lantern {
+    /// Returns whether the editor should accept writing.
+    ///
+    /// Text typed with no project open has nowhere to be kept: there is no
+    /// document to save it to and nothing to open one from. The editor is drawn
+    /// as an inert page until a project is open, rather than as one that takes
+    /// text and quietly loses it.
+    pub(crate) fn accepts_writing(&self) -> bool {
+        self.project.is_some()
+    }
+
     /// Returns the project-relative path of the document being edited.
     pub(crate) fn open_document_path(&self) -> Option<&Path> {
         self.open_document.as_ref().map(Document::relative_path)
@@ -89,7 +99,6 @@ pub(crate) enum Message {
 
 fn boot() -> (Lantern, Task<Message>) {
     let editor_id = Id::unique();
-    let focus_editor = operation::focus(editor_id.clone());
     let (interface_theme, theme_error) =
         match crate::theme::service().theme(crate::theme::DEFAULT_THEME) {
             Ok(theme) => (crate::theme::to_iced(&theme), None),
@@ -117,7 +126,9 @@ fn boot() -> (Lantern, Task<Message>) {
             interface_theme,
             theme_error,
         },
-        focus_editor,
+        // Lantern opens without a project, so the editor is inert and takes no
+        // focus. Opening a document is what puts the caret in it.
+        Task::none(),
     )
 }
 
