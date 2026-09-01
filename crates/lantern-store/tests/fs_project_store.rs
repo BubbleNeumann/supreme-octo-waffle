@@ -232,3 +232,72 @@ fn a_non_utf8_file_name_stays_openable() {
         .expect("a listed document must be readable");
     assert_eq!(document.content(), "Once upon a time");
 }
+
+#[test]
+fn creates_a_directory_a_project_is_missing() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let project = FsProjectStore
+        .open_project(directory.path())
+        .expect("project should open");
+
+    FsProjectStore
+        .create_directory(&project, Path::new("chapters"))
+        .expect("directory should be created");
+
+    assert!(directory.path().join("chapters").is_dir());
+}
+
+#[test]
+fn accepts_a_directory_that_is_already_there_without_touching_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    fs::write(directory.path().join("chapters").join("one.md"), "one").expect("chapter file");
+    let project = FsProjectStore
+        .open_project(directory.path())
+        .expect("project should open");
+
+    FsProjectStore
+        .create_directory(&project, Path::new("chapters"))
+        .expect("existing directory should be accepted");
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("chapters").join("one.md")).expect("read back"),
+        "one"
+    );
+}
+
+#[test]
+fn reports_a_file_standing_where_a_directory_belongs() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::write(directory.path().join("drawer"), "not a directory").expect("blocking file");
+    let project = FsProjectStore
+        .open_project(directory.path())
+        .expect("project should open");
+
+    assert!(matches!(
+        FsProjectStore.create_directory(&project, Path::new("drawer")),
+        Err(StoreError::NotDirectory(_))
+    ));
+}
+
+#[test]
+fn refuses_to_create_a_directory_outside_the_project() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let project = FsProjectStore
+        .open_project(directory.path())
+        .expect("project should open");
+
+    assert!(matches!(
+        FsProjectStore.create_directory(&project, Path::new("../escaped")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(matches!(
+        FsProjectStore.create_directory(&project, Path::new(".lantern/state")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(matches!(
+        FsProjectStore.create_directory(&project, Path::new("")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(!directory.path().parent().unwrap().join("escaped").exists());
+}

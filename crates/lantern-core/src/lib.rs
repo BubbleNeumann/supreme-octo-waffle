@@ -7,6 +7,14 @@ pub use theme::{BaseColors, Color, Theme, ThemeError, ThemeMode, ThemePalette};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// The directories a Lantern project keeps at its root, in the order shown.
+///
+/// A project opens onto these and nothing else, so that every project presents
+/// the same shape however the directory behind it is arranged. Anything else at
+/// the root belongs to the author rather than to Lantern, and stays out of
+/// sight rather than being moved or removed.
+pub const WORKSPACE_DIRECTORIES: [&str; 3] = ["chapters", "references", "drawer"];
+
 /// An opened Lantern project rooted at an ordinary directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -216,6 +224,15 @@ impl ProjectEntry {
     /// Returns whether this entry is an ordinary directory.
     pub fn is_directory(&self) -> bool {
         self.kind == ProjectEntryKind::Directory
+    }
+
+    /// Returns whether this entry is a directory carrying `name`.
+    ///
+    /// The name is compared without case, because Windows and macOS report a
+    /// directory as it was created rather than as it was asked for, and a
+    /// project holding `Chapters` holds the chapters directory.
+    pub fn is_directory_named(&self, name: &str) -> bool {
+        self.is_directory() && self.name.eq_ignore_ascii_case(name)
     }
 }
 

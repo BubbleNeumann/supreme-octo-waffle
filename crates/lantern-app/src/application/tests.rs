@@ -1,4 +1,16 @@
 use super::*;
+use lantern_service::WORKSPACE_DIRECTORIES;
+
+/// Returns the names the explorer draws at the project root.
+fn workspace_names(lantern: &Lantern) -> Vec<&str> {
+    lantern
+        .explorer
+        .visible_rows()
+        .into_iter()
+        .filter(|row| row.depth == 0)
+        .map(|row| row.entry.name())
+        .collect()
+}
 
 #[test]
 fn edit_message_updates_the_editor_buffer() {
@@ -88,7 +100,7 @@ fn selected_parent_creates_and_opens_a_new_project() {
         Message::ProjectParentPicked(Some(parent.path().to_owned())),
     ));
 
-    assert!(lantern.explorer.is_empty());
+    assert_eq!(workspace_names(&lantern), WORKSPACE_DIRECTORIES);
     assert!(lantern.project_error.is_none());
     let project = lantern.project.expect("created project should be open");
     assert!(project.root().is_dir());
@@ -96,11 +108,11 @@ fn selected_parent_creates_and_opens_a_new_project() {
 }
 
 #[test]
-fn opening_a_project_loads_only_its_root_entries() {
+fn opening_a_project_shows_the_workspace_directories_and_nothing_else() {
     let directory = tempfile::tempdir().expect("temporary directory");
     std::fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    std::fs::create_dir(directory.path().join("old drafts")).expect("other directory");
     std::fs::write(directory.path().join("notes.md"), "notes").expect("notes file");
-    std::fs::write(directory.path().join("chapters").join("one.md"), "one").expect("chapter file");
     let (mut lantern, _) = boot();
 
     drop(update(
@@ -111,9 +123,44 @@ fn opening_a_project_loads_only_its_root_entries() {
     let rows = lantern.explorer.visible_rows();
     assert_eq!(
         rows.iter().map(|row| row.entry.name()).collect::<Vec<_>>(),
-        vec!["chapters", "notes.md"]
+        WORKSPACE_DIRECTORIES
     );
     assert!(rows.iter().all(|row| row.depth == 0));
+    // Left where the author put them, out of sight rather than removed.
+    assert!(directory.path().join("old drafts").is_dir());
+    assert!(directory.path().join("notes.md").is_file());
+}
+
+#[test]
+fn opening_a_project_creates_the_workspace_directories_it_is_missing() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let (mut lantern, _) = boot();
+
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(directory.path().to_owned())),
+    ));
+
+    for name in WORKSPACE_DIRECTORIES {
+        assert!(directory.path().join(name).is_dir(), "{name} should exist");
+    }
+    assert_eq!(workspace_names(&lantern), WORKSPACE_DIRECTORIES);
+    assert!(lantern.project_error.is_none());
+}
+
+#[test]
+fn a_file_standing_where_a_workspace_directory_belongs_stops_the_project_opening() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(directory.path().join("drawer"), "not a directory").expect("blocking file");
+    let (mut lantern, _) = boot();
+
+    drop(update(
+        &mut lantern,
+        Message::OpenProjectFolderPicked(Some(directory.path().to_owned())),
+    ));
+
+    assert!(lantern.project.is_none());
+    assert!(lantern.project_error.is_some());
 }
 
 #[test]
@@ -133,7 +180,8 @@ fn expanding_a_directory_loads_its_children() {
     ));
 
     let rows = lantern.explorer.visible_rows();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), WORKSPACE_DIRECTORIES.len() + 1);
+    assert_eq!(rows[0].entry.name(), "chapters");
     assert!(rows[0].expanded);
     assert_eq!(rows[1].entry.name(), "one.md");
     assert_eq!(rows[1].depth, 1);
@@ -142,7 +190,7 @@ fn expanding_a_directory_loads_its_children() {
 #[test]
 fn clicking_a_document_loads_it_into_the_editor() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    std::fs::write(directory.path().join("chapter.md"), "A beginning").expect("document file");
+    write_document(directory.path(), "chapters/chapter.md", "A beginning");
     let (mut lantern, _) = boot();
     drop(update(
         &mut lantern,
@@ -151,19 +199,22 @@ fn clicking_a_document_loads_it_into_the_editor() {
 
     drop(update(
         &mut lantern,
-        Message::OpenDocument(PathBuf::from("chapter.md")),
+        Message::OpenDocument(PathBuf::from("chapters/chapter.md")),
     ));
 
     assert_eq!(lantern.editor.text(), "A beginning");
-    assert_eq!(lantern.open_document_path(), Some(Path::new("chapter.md")));
+    assert_eq!(
+        lantern.open_document_path(),
+        Some(Path::new("chapters/chapter.md"))
+    );
     assert!(lantern.project_error.is_none());
 }
 
 #[test]
 fn an_unsupported_file_does_not_replace_the_open_document() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    std::fs::write(directory.path().join("chapter.txt"), "Keep me").expect("document file");
-    std::fs::write(directory.path().join("cover.png"), "not an image").expect("other file");
+    write_document(directory.path(), "chapters/chapter.txt", "Keep me");
+    write_document(directory.path(), "chapters/cover.png", "not an image");
     let (mut lantern, _) = boot();
     drop(update(
         &mut lantern,
@@ -171,16 +222,19 @@ fn an_unsupported_file_does_not_replace_the_open_document() {
     ));
     drop(update(
         &mut lantern,
-        Message::OpenDocument(PathBuf::from("chapter.txt")),
+        Message::OpenDocument(PathBuf::from("chapters/chapter.txt")),
     ));
 
     drop(update(
         &mut lantern,
-        Message::OpenDocument(PathBuf::from("cover.png")),
+        Message::OpenDocument(PathBuf::from("chapters/cover.png")),
     ));
 
     assert_eq!(lantern.editor.text(), "Keep me");
-    assert_eq!(lantern.open_document_path(), Some(Path::new("chapter.txt")));
+    assert_eq!(
+        lantern.open_document_path(),
+        Some(Path::new("chapters/chapter.txt"))
+    );
     assert!(lantern.project_error.is_some());
 }
 
@@ -206,7 +260,10 @@ fn collapsing_a_directory_releases_its_cached_listing() {
     ));
 
     assert!(!lantern.explorer.has_listing(Path::new("chapters")));
-    assert_eq!(lantern.explorer.visible_rows().len(), 1);
+    assert_eq!(
+        lantern.explorer.visible_rows().len(),
+        WORKSPACE_DIRECTORIES.len()
+    );
 }
 
 #[test]
@@ -228,7 +285,10 @@ fn collapsing_a_directory_releases_the_listings_nested_under_it() {
         &mut lantern,
         Message::ToggleProjectDirectory(PathBuf::from("chapters").join("act-one")),
     ));
-    assert_eq!(lantern.explorer.visible_rows().len(), 3);
+    assert_eq!(
+        lantern.explorer.visible_rows().len(),
+        WORKSPACE_DIRECTORIES.len() + 2
+    );
 
     drop(update(
         &mut lantern,
@@ -275,11 +335,11 @@ fn re_expanding_a_directory_restores_the_shape_it_was_collapsed_with() {
     let rows = lantern.explorer.visible_rows();
     assert_eq!(
         rows.iter().map(|row| row.entry.name()).collect::<Vec<_>>(),
-        vec!["chapters", "act-one", "one.md"]
+        vec!["chapters", "act-one", "one.md", "references", "drawer"]
     );
     assert_eq!(
         rows.iter().map(|row| row.depth).collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 0, 0]
     );
     assert!(lantern.project_error.is_none());
 }
@@ -314,6 +374,19 @@ fn a_directory_that_disappeared_while_collapsed_does_not_stay_expanded() {
     assert!(lantern.project_error.is_some());
 }
 
+/// Writes a document into a project, creating the directories above it.
+fn write_document(directory: &Path, relative_path: &str, text: &str) -> PathBuf {
+    let path = directory.join(relative_path);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("document directory");
+    }
+
+    std::fs::write(&path, text).expect("document file");
+
+    path
+}
+
 /// Opens `directory` as a project with `relative_path` in the editor.
 fn open_project_document(directory: &Path, relative_path: &str) -> Lantern {
     let (mut lantern, _) = boot();
@@ -344,9 +417,8 @@ fn type_text(lantern: &mut Lantern, text: &str) {
 #[test]
 fn saving_writes_the_edited_text_over_the_document() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("chapter.md");
-    std::fs::write(&path, "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    let path = write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     type_text(&mut lantern, "!");
 
     drop(update(&mut lantern, Message::SaveDocument));
@@ -359,8 +431,8 @@ fn saving_writes_the_edited_text_over_the_document() {
 #[test]
 fn an_edit_leaves_the_document_unsaved_until_it_is_written() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    std::fs::write(directory.path().join("chapter.md"), "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     assert!(!lantern.unsaved_edits);
 
     type_text(&mut lantern, "!");
@@ -373,8 +445,8 @@ fn an_edit_leaves_the_document_unsaved_until_it_is_written() {
 #[test]
 fn moving_around_the_document_does_not_make_it_unsaved() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    std::fs::write(directory.path().join("chapter.md"), "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
 
     drop(update(
         &mut lantern,
@@ -391,9 +463,8 @@ fn moving_around_the_document_does_not_make_it_unsaved() {
 #[test]
 fn saving_an_unchanged_document_leaves_the_file_alone() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("chapter.md");
-    std::fs::write(&path, "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    let path = write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     // Written behind Lantern's back: a save that has nothing to store must not
     // overwrite it with the buffer it already agrees with.
     std::fs::write(&path, "Written elsewhere").expect("rewrite document");
@@ -409,9 +480,8 @@ fn saving_an_unchanged_document_leaves_the_file_alone() {
 #[test]
 fn an_edit_that_is_undone_is_not_written_again() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("chapter.md");
-    std::fs::write(&path, "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    let path = write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     type_text(&mut lantern, "!");
     drop(update(
         &mut lantern,
@@ -431,9 +501,8 @@ fn an_edit_that_is_undone_is_not_written_again() {
 #[test]
 fn saving_keeps_the_line_endings_the_document_was_opened_with() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("chapter.md");
-    std::fs::write(&path, "One\r\nTwo\r\n").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    let path = write_document(directory.path(), "chapters/chapter.md", "One\r\nTwo\r\n");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     type_text(&mut lantern, "!");
 
     drop(update(&mut lantern, Message::SaveDocument));
@@ -447,15 +516,14 @@ fn saving_keeps_the_line_endings_the_document_was_opened_with() {
 #[test]
 fn opening_another_document_saves_the_one_being_left() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let first = directory.path().join("one.md");
-    std::fs::write(&first, "One").expect("first document");
-    std::fs::write(directory.path().join("two.md"), "Two").expect("second document");
-    let mut lantern = open_project_document(directory.path(), "one.md");
+    let first = write_document(directory.path(), "chapters/one.md", "One");
+    write_document(directory.path(), "chapters/two.md", "Two");
+    let mut lantern = open_project_document(directory.path(), "chapters/one.md");
     type_text(&mut lantern, "!");
 
     drop(update(
         &mut lantern,
-        Message::OpenDocument(PathBuf::from("two.md")),
+        Message::OpenDocument(PathBuf::from("chapters/two.md")),
     ));
 
     assert_eq!(std::fs::read_to_string(&first).expect("read back"), "!One");
@@ -494,9 +562,8 @@ fn saving_without_an_open_document_does_nothing() {
 #[test]
 fn a_document_that_disappeared_reports_the_failed_save_and_stays_unsaved() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("chapter.md");
-    std::fs::write(&path, "One").expect("document file");
-    let mut lantern = open_project_document(directory.path(), "chapter.md");
+    let path = write_document(directory.path(), "chapters/chapter.md", "One");
+    let mut lantern = open_project_document(directory.path(), "chapters/chapter.md");
     type_text(&mut lantern, "!");
     std::fs::remove_file(&path).expect("remove document");
 

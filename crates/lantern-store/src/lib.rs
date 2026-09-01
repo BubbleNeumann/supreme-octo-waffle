@@ -27,6 +27,13 @@ pub trait ProjectStore {
     /// Creates a project as one new child directory of `parent`.
     fn create_project(&self, parent: &Path, name: &ProjectName) -> Result<Project, StoreError>;
 
+    /// Creates one directory inside a project, accepting one already there.
+    ///
+    /// Callers use this to put a directory a project needs in place, so an
+    /// existing directory is success rather than a conflict. Anything else
+    /// standing in its place is a failure.
+    fn create_directory(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError>;
+
     /// Lists one directory inside a project without recursively traversing it.
     fn list_directory(
         &self,
@@ -75,6 +82,40 @@ impl ProjectStore for FsProjectStore {
         }
 
         self.open_project(&root)
+    }
+
+    fn create_directory(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError> {
+        if relative_path.as_os_str().is_empty()
+            || !is_safe_relative_path(relative_path)
+            || is_lantern_internal_path(relative_path)
+        {
+            return Err(StoreError::UnsafeProjectPath(relative_path.to_owned()));
+        }
+
+        let directory = project.root().join(relative_path);
+
+        match fs::create_dir_all(&directory) {
+            Ok(()) => {}
+            // `create_dir_all` reports an existing file as another kind of
+            // failure on some systems; the check below names it properly.
+            Err(_) if directory.exists() => {}
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: directory,
+                    source,
+                });
+            }
+        }
+
+        // Resolving afterwards rejects anything that leaves the project, such
+        // as a symbolic link standing where the directory belongs.
+        let resolved = resolve_project_path(project, relative_path)?;
+
+        if !resolved.is_dir() {
+            return Err(StoreError::NotDirectory(resolved));
+        }
+
+        Ok(())
     }
 
     fn list_directory(
