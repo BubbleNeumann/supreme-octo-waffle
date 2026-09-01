@@ -1,6 +1,8 @@
+mod caret;
 mod editor;
 mod sidebar;
 mod style;
+pub(crate) mod text_editor;
 
 use crate::application::{Lantern, Message};
 use iced::widget::row;

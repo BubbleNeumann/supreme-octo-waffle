@@ -1,12 +1,14 @@
 use super::style;
+use super::text_editor;
 use crate::application::{Lantern, Message};
-use iced::widget::{container, text_editor};
+use iced::widget::container;
 use iced::{Color, Element, Fill};
 
 pub(super) fn view(lantern: &Lantern) -> Element<'_, Message> {
     container(
-        text_editor(&lantern.editor)
+        text_editor::TextEditor::new(&lantern.editor)
             .id(lantern.editor_id.clone())
+            .font(crate::application::EDITOR_FONT)
             .placeholder("Start writing...")
             .on_action(Message::Edit)
             .size(lantern.editor_font_size)

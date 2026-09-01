@@ -1,8 +1,9 @@
 pub(crate) mod explorer;
 
+use crate::ui::text_editor;
 use explorer::Explorer;
 use iced::futures::Stream;
-use iced::widget::{Id, operation, text_editor};
+use iced::widget::{Id, operation};
 use iced::{Event, Size, Subscription, Task, event, keyboard, stream};
 use lantern_service::{Document, FsProjectService, Project};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,17 @@ use std::time::Duration;
 
 const WINDOW_TITLE: &str = "Lantern";
 const WINDOW_SIZE: Size = Size::new(960.0, 640.0);
+/// The typeface documents are written and read in.
+///
+/// IBM Plex Mono is monospaced but drawn for running text rather than only for
+/// code, so a manuscript in it reads as prose. It is carried in the binary
+/// rather than looked for on the system, because a writing application that
+/// falls back to whatever monospace a machine happens to have is a writing
+/// application that looks different on every machine.
+pub(crate) const EDITOR_FONT: iced::Font = iced::Font::with_name("IBM Plex Mono");
+/// The bytes of [`EDITOR_FONT`], registered with Iced before the window opens.
+pub(crate) const EDITOR_FONT_BYTES: &[u8] =
+    include_bytes!("../../../fonts/IBMPlexMono-Regular.ttf");
 const DEFAULT_EDITOR_FONT_SIZE: f32 = 16.0;
 const MIN_EDITOR_FONT_SIZE: f32 = 10.0;
 const MAX_EDITOR_FONT_SIZE: f32 = 32.0;
@@ -21,6 +33,7 @@ const FALLBACK_THEME: iced::Theme = iced::Theme::Dark;
 
 pub(crate) fn run() -> iced::Result {
     iced::application(boot, update, crate::ui::view)
+        .font(EDITOR_FONT_BYTES)
         .title(WINDOW_TITLE)
         .subscription(subscription)
         .theme(theme)
