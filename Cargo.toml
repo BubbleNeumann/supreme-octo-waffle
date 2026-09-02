@@ -22,10 +22,20 @@ iced = { version = "0.14.0", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Decoding the application icon: Iced takes an icon as raw pixels and brings
+# no decoder of its own.
+png = "0.18.1"
 rfd = "0.17.2"
 tempfile = "3"
+# Embedding the Windows application icon into the executable at build time.
+winresource = "0.1.31"
 thiserror = "2.0"
-toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
+# "display" writes the document order back out; themes only need to be read.
+toml = { version = "1.1", default-features = false, features = [
+    "display",
+    "parse",
+    "serde",
+] }
 
 # Lantern uses Iced's CPU renderer to keep idle memory low. Optimizing third-party
 # crates in development builds keeps scrolling responsive without making Lantern's

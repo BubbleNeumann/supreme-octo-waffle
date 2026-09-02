@@ -75,9 +75,27 @@ impl Explorer {
             .retain(|listed, _| !listed.starts_with(directory));
     }
 
+    /// Drops one directory's listing without collapsing it.
+    ///
+    /// A directory Lantern has just written into is stale in memory. Forgetting
+    /// its listing is enough to have it read again, because a directory that is
+    /// expanded without a listing is one of the directories loaded on the next
+    /// pass; collapsing it would also close everything below.
+    pub(crate) fn forget_listing(&mut self, directory: &Path) {
+        self.listings.remove(directory);
+    }
+
     /// Stores one directory's listing.
     pub(crate) fn insert_listing(&mut self, directory: PathBuf, entries: Vec<ProjectEntry>) {
         self.listings.insert(directory, entries);
+    }
+
+    /// Returns one directory's listing, when the explorer is holding it.
+    ///
+    /// The sidebar draws from [`Self::visible_rows`]; this answers questions
+    /// about one directory on its own, such as which document follows another.
+    pub(crate) fn listing(&self, directory: &Path) -> Option<&[ProjectEntry]> {
+        self.listings.get(directory).map(Vec::as_slice)
     }
 
     /// Returns the next visible directory that is expanded but has no listing.

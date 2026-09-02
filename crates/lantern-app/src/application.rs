@@ -4,8 +4,8 @@ use crate::ui::text_editor;
 use explorer::Explorer;
 use iced::futures::Stream;
 use iced::widget::{Id, operation};
-use iced::{Event, Size, Subscription, Task, event, keyboard, stream};
-use lantern_service::{Document, FsProjectService, Project};
+use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, stream};
+use lantern_service::{DEFAULT_DOCUMENT_DIRECTORY, Document, FsProjectService, Project};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,6 +28,13 @@ const MAX_EDITOR_FONT_SIZE: f32 = 32.0;
 const FONT_ZOOM_STEP: f32 = 1.0;
 /// How long an edit may stay unwritten before autosave stores it.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// The mark the window carries into the taskbar and the window list.
+///
+/// One image serves every size the system asks for, and it is the largest of
+/// the drawn marks that is still square, so that a system scaling it for a
+/// small slot is always scaling down. Iced wants pixels rather than a file, so
+/// this is decoded on the way in.
+const WINDOW_ICON_BYTES: &[u8] = include_bytes!("../../../icons/lantern-logo-taskbar.png");
 /// Drawn when no theme file can be read, so the window is never unstyled.
 const FALLBACK_THEME: iced::Theme = iced::Theme::Dark;
 
@@ -37,6 +44,12 @@ pub(crate) fn run() -> iced::Result {
         .title(WINDOW_TITLE)
         .subscription(subscription)
         .theme(theme)
+        // Settings first: the calls below fold into these, while this one
+        // would replace whatever they had set.
+        .window(iced::window::Settings {
+            icon: window_icon(),
+            ..iced::window::Settings::default()
+        })
         .window_size(WINDOW_SIZE)
         .centered()
         .exit_on_close_request(true)
@@ -53,6 +66,10 @@ pub(crate) struct Lantern {
     pub(crate) project_error: Option<String>,
     pub(crate) creating_project: bool,
     pub(crate) new_project_name: String,
+    pub(crate) creating_document: bool,
+    pub(crate) new_document_name: String,
+    pub(crate) hovered_entry: Option<HoveredEntry>,
+    pub(crate) dragged_document: Option<PathBuf>,
     pub(crate) editor: text_editor::Content,
     pub(crate) editor_id: Id,
     pub(crate) editor_font_size: f32,
@@ -78,19 +95,59 @@ impl Lantern {
     pub(crate) fn open_document_path(&self) -> Option<&Path> {
         self.open_document.as_ref().map(Document::relative_path)
     }
+
+    /// Returns the project directory a new document would be created in.
+    ///
+    /// A document is created beside the one being edited, so that a new
+    /// chapter joins the chapters and a new note joins the references. With
+    /// nothing open there is nothing to sit beside, and it goes where the
+    /// drafts are kept. The sidebar names the directory before anything is
+    /// created, so the choice is never a surprise.
+    pub(crate) fn new_document_directory(&self) -> &Path {
+        self.open_document_path()
+            .and_then(Path::parent)
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or(Path::new(DEFAULT_DOCUMENT_DIRECTORY))
+    }
+}
+
+/// The explorer row the pointer is over.
+///
+/// A drag is read from where the pointer is rather than from the widget that
+/// was pressed, because the row's button takes the press for itself: it is what
+/// opens a document, and a press it did not see is a click it would not report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HoveredEntry {
+    /// A document row, which a drag can carry or be placed against.
+    Document {
+        /// The document the row draws.
+        relative_path: PathBuf,
+        /// Whether the pointer is in the row's top edge, meaning a document let
+        /// go here belongs before this one rather than after it.
+        above: bool,
+    },
+    /// A directory row, which a drag can be let go over.
+    Directory(PathBuf),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
+    BeginCreateDocument,
     BeginCreateProject,
+    CancelCreateDocument,
     CancelCreateProject,
     ChooseProjectParent,
+    CreateDocument,
     Edit(text_editor::Action),
+    EntryHovered(Option<HoveredEntry>),
     ModifiersChanged(keyboard::Modifiers),
+    NewDocumentNameChanged(String),
     NewProjectNameChanged(String),
     OpenDocument(PathBuf),
     OpenProject,
     OpenProjectFolderPicked(Option<PathBuf>),
+    PointerPressed,
+    PointerReleased,
     ProjectParentPicked(Option<PathBuf>),
     SaveDocument,
     ToggleProjectDirectory(PathBuf),
@@ -117,6 +174,10 @@ fn boot() -> (Lantern, Task<Message>) {
             project_error: None,
             creating_project: false,
             new_project_name: String::new(),
+            creating_document: false,
+            new_document_name: String::new(),
+            hovered_entry: None,
+            dragged_document: None,
             editor: text_editor::Content::new(),
             editor_id,
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
@@ -134,9 +195,19 @@ fn boot() -> (Lantern, Task<Message>) {
 
 fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
     match message {
+        Message::BeginCreateDocument => {
+            lantern.creating_document = true;
+            lantern.new_document_name.clear();
+            lantern.project_error = None;
+        }
         Message::BeginCreateProject => {
             lantern.creating_project = true;
             lantern.new_project_name.clear();
+            lantern.project_error = None;
+        }
+        Message::CancelCreateDocument => {
+            lantern.creating_document = false;
+            lantern.new_document_name.clear();
             lantern.project_error = None;
         }
         Message::CancelCreateProject => {
@@ -152,8 +223,17 @@ fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
                 Message::ProjectParentPicked,
             );
         }
+        Message::CreateDocument => {
+            if let Some(relative_path) = create_document(lantern)
+                && open_document(lantern, &relative_path)
+            {
+                return operation::focus(lantern.editor_id.clone());
+            }
+        }
         Message::Edit(action) => edit_document(lantern, action),
+        Message::EntryHovered(entry) => lantern.hovered_entry = entry,
         Message::ModifiersChanged(modifiers) => lantern.modifiers = modifiers,
+        Message::NewDocumentNameChanged(name) => lantern.new_document_name = name,
         Message::NewProjectNameChanged(name) => lantern.new_project_name = name,
         Message::OpenDocument(relative_path) => {
             if open_document(lantern, &relative_path) {
@@ -173,6 +253,14 @@ fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
             apply_project_result(lantern, result);
         }
         Message::OpenProjectFolderPicked(None) => {}
+        Message::PointerPressed => {
+            // Only a document is carried. A directory is a place to put one,
+            // and dragging a whole folder would move everything below it.
+            if let Some(HoveredEntry::Document { relative_path, .. }) = &lantern.hovered_entry {
+                lantern.dragged_document = Some(relative_path.clone());
+            }
+        }
+        Message::PointerReleased => drop_dragged_document(lantern),
         Message::ProjectParentPicked(Some(parent)) => {
             let result = lantern
                 .project_service
@@ -188,6 +276,32 @@ fn update(lantern: &mut Lantern, message: Message) -> Task<Message> {
     }
 
     Task::none()
+}
+
+/// Decodes the window's icon into the pixels Iced hands the system.
+///
+/// A window with no icon is given the system's default one, so every failure
+/// here costs the mark and nothing else. That is worth more than refusing to
+/// open over a picture.
+fn window_icon() -> Option<iced::window::Icon> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(WINDOW_ICON_BYTES));
+
+    // Whatever the file is stored as - palette, grayscale, no alpha, sixteen
+    // bits a channel - these ask the decoder for the eight-bit RGBA that
+    // `from_rgba` requires.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+
+    let mut reader = decoder.read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut pixels).ok()?;
+
+    pixels.truncate(frame.buffer_size());
+
+    if frame.color_type != png::ColorType::Rgba {
+        return None;
+    }
+
+    iced::window::icon::from_rgba(pixels, frame.width, frame.height).ok()
 }
 
 async fn pick_folder(title: &'static str) -> Option<PathBuf> {
@@ -257,9 +371,205 @@ fn apply_project_result(
 
             lantern.creating_project = false;
             lantern.new_project_name.clear();
+            lantern.creating_document = false;
+            lantern.new_document_name.clear();
+            lantern.hovered_entry = None;
+            lantern.dragged_document = None;
         }
         Err(error) => lantern.project_error = Some(error.to_string()),
     }
+}
+
+/// Creates a document from the typed name and reveals it in the explorer.
+///
+/// Returns the new document's project-relative path so that the caller can open
+/// it, or `None` when nothing was created; a failure is reported in the sidebar
+/// and leaves the name in the field to be corrected.
+fn create_document(lantern: &mut Lantern) -> Option<PathBuf> {
+    let directory = lantern.new_document_directory().to_owned();
+    let created = {
+        let project = lantern.project.as_ref()?;
+
+        lantern.project_service.create_document(
+            project,
+            &directory,
+            lantern.new_document_name.clone(),
+        )
+    };
+
+    let document = match created {
+        Ok(document) => document,
+        Err(error) => {
+            lantern.project_error = Some(error.to_string());
+            return None;
+        }
+    };
+
+    lantern.creating_document = false;
+    lantern.new_document_name.clear();
+    lantern.project_error = None;
+
+    reveal_directory(lantern, &directory);
+    load_visible_directories(lantern);
+
+    Some(document.relative_path().to_owned())
+}
+
+/// Carries out the drop a released drag was asking for.
+///
+/// A press that never left its own row is a click rather than a drag: the row
+/// under the pointer is still the document itself, which asks for nothing, and
+/// the row's button emits the message that opens it. Letting go anywhere else -
+/// over the editor, over the sidebar's own controls - names no row either, and
+/// the drag is simply dropped.
+fn drop_dragged_document(lantern: &mut Lantern) {
+    let Some(relative_path) = lantern.dragged_document.take() else {
+        return;
+    };
+
+    match lantern.hovered_entry.clone() {
+        // Let go over a directory: the document goes into it, and takes
+        // whatever place that directory's order leaves it.
+        Some(HoveredEntry::Directory(directory)) => {
+            // A document let go over the directory it already sits in has not
+            // moved, and asking storage to move it there would fail on its own
+            // name.
+            if relative_path.parent() == Some(directory.as_path()) {
+                return;
+            }
+
+            let moved = {
+                let Some(project) = lantern.project.as_ref() else {
+                    return;
+                };
+
+                lantern
+                    .project_service
+                    .move_document(project, &relative_path, &directory)
+            };
+
+            finish_drop(lantern, &relative_path, &directory, moved);
+        }
+        // Let go against another document: the drop names a place in that
+        // document's directory, which is recorded as the author's order.
+        Some(HoveredEntry::Document {
+            relative_path: hovered_path,
+            above,
+        }) => {
+            if hovered_path == relative_path {
+                return;
+            }
+
+            let Some(directory) = hovered_path.parent().map(Path::to_owned) else {
+                return;
+            };
+            let before = insertion_anchor(lantern, &directory, &hovered_path, above);
+
+            let placed = {
+                let Some(project) = lantern.project.as_ref() else {
+                    return;
+                };
+
+                lantern.project_service.place_document(
+                    project,
+                    &relative_path,
+                    &directory,
+                    before.as_deref(),
+                )
+            };
+
+            finish_drop(lantern, &relative_path, &directory, placed);
+        }
+        None => {}
+    }
+}
+
+/// Returns the document a dropped one should stand before, if any.
+///
+/// Let go over a row's top edge, a document stands before that row; let go
+/// anywhere else on it, before whichever document follows. `None` asks for the
+/// end of the directory, which is also the answer when the listing the row came
+/// from is no longer held - the drop is honoured rather than abandoned over
+/// bookkeeping the author cannot see.
+fn insertion_anchor(
+    lantern: &Lantern,
+    directory: &Path,
+    hovered: &Path,
+    above: bool,
+) -> Option<String> {
+    let documents: Vec<&str> = lantern
+        .explorer
+        .listing(directory)?
+        .iter()
+        .filter(|entry| !entry.is_directory())
+        .map(|entry| entry.name())
+        .collect();
+
+    let hovered_name = hovered.file_name().and_then(|name| name.to_str())?;
+    let index = documents.iter().position(|name| *name == hovered_name)?;
+
+    if above {
+        return Some(documents[index].to_owned());
+    }
+
+    documents.get(index + 1).map(|name| (*name).to_owned())
+}
+
+/// Puts the explorer and the editor back in step with a drop that has happened.
+fn finish_drop(
+    lantern: &mut Lantern,
+    relative_path: &Path,
+    directory: &Path,
+    result: Result<PathBuf, lantern_service::ProjectServiceError>,
+) {
+    let moved_path = match result {
+        Ok(moved_path) => moved_path,
+        Err(error) => {
+            lantern.project_error = Some(error.to_string());
+            return;
+        }
+    };
+
+    // The document in the editor is the same document; only its path may have
+    // changed. Told about the move, it keeps its text, its unsaved edits and
+    // the caret where the author left it, and the next save writes where the
+    // file is now.
+    if lantern.open_document_path() == Some(relative_path)
+        && let Some(document) = lantern.open_document.as_mut()
+    {
+        document.record_moved(moved_path);
+    }
+
+    lantern.project_error = None;
+
+    // Both ends of the drop are stale: the directory the document left still
+    // lists it, and the one it arrived in either does not hold it or holds it
+    // in the sequence it had before.
+    if let Some(parent) = relative_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        lantern.explorer.forget_listing(parent);
+    }
+
+    reveal_directory(lantern, directory);
+    load_visible_directories(lantern);
+}
+
+/// Expands the way down to a directory and has its listing read again.
+///
+/// A directory Lantern has just written into is stale in memory, and may not
+/// even be drawn. Expanding every directory above it and forgetting its listing
+/// leaves both to [`load_visible_directories`], which the caller runs next.
+fn reveal_directory(lantern: &mut Lantern, directory: &Path) {
+    for ancestor in directory
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+    {
+        lantern.explorer.expand(ancestor.to_owned());
+    }
+
+    lantern.explorer.forget_listing(directory);
 }
 
 fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {
@@ -384,6 +694,16 @@ fn subscription(lantern: &Lantern) -> Subscription<Message> {
             // Ctrl+S on a keyboard layout that is not Latin.
             (modifiers.command() && key.to_latin(physical_key) == Some('s'))
                 .then_some(Message::SaveDocument)
+        }
+        // A row's button takes the press and the release for itself, so a drag
+        // is read from the window rather than from the widget. Letting go
+        // outside the explorer has to arrive too, or a drag abandoned over the
+        // editor would still be held when the pointer returned.
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            Some(Message::PointerPressed)
+        }
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Some(Message::PointerReleased)
         }
         _ => None,
     })];

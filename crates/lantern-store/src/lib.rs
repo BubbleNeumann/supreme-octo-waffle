@@ -1,5 +1,6 @@
 //! Persistence interfaces and implementations for Lantern.
 
+mod order;
 mod theme;
 
 pub use theme::{FsThemeStore, ThemeStore};
@@ -33,6 +34,43 @@ pub trait ProjectStore {
     /// existing directory is success rather than a conflict. Anything else
     /// standing in its place is a failure.
     fn create_directory(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError>;
+
+    /// Creates one empty document inside a project.
+    ///
+    /// The document must not already be there: creating never writes over a
+    /// file, because an author who names a document that exists means a new
+    /// document rather than an empty one where their work used to be.
+    fn create_document(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError>;
+
+    /// Moves one document into another directory inside the same project.
+    ///
+    /// The document keeps its own name, so only the directory holding it
+    /// changes. Returns the project-relative path the document now has.
+    fn move_document(
+        &self,
+        project: &Project,
+        relative_path: &Path,
+        directory: &Path,
+    ) -> Result<PathBuf, StoreError>;
+
+    /// Reads the order an author has given one directory's documents.
+    ///
+    /// A directory that has never been ordered, and one whose recorded order
+    /// cannot be read, both give an empty order. Lantern's own state is never
+    /// required to list a project.
+    fn document_order(&self, project: &Project, directory: &Path) -> Vec<String>;
+
+    /// Records the order of one directory's documents.
+    ///
+    /// The names are stored as given, so a caller passing the directory's whole
+    /// listing records a complete order and one passing an empty slice returns
+    /// the directory to the order storage lists it in.
+    fn set_document_order(
+        &self,
+        project: &Project,
+        directory: &Path,
+        names: &[String],
+    ) -> Result<(), StoreError>;
 
     /// Lists one directory inside a project without recursively traversing it.
     fn list_directory(
@@ -116,6 +154,93 @@ impl ProjectStore for FsProjectStore {
         }
 
         Ok(())
+    }
+
+    fn create_document(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError> {
+        if !is_safe_relative_path(relative_path) || is_lantern_internal_path(relative_path) {
+            return Err(StoreError::UnsafeProjectPath(relative_path.to_owned()));
+        }
+
+        let Some(file_name) = relative_path.file_name() else {
+            return Err(StoreError::UnsafeProjectPath(relative_path.to_owned()));
+        };
+
+        // The document does not exist yet, so it is the directory holding it
+        // that is resolved and checked to be inside the project.
+        let directory =
+            resolve_project_path(project, relative_path.parent().unwrap_or(Path::new("")))?;
+
+        if !directory.is_dir() {
+            return Err(StoreError::NotDirectory(directory));
+        }
+
+        let document_path = directory.join(file_name);
+
+        match fs::File::create_new(&document_path) {
+            Ok(_) => Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                Err(StoreError::AlreadyExists(document_path))
+            }
+            Err(source) => Err(StoreError::Io {
+                path: document_path,
+                source,
+            }),
+        }
+    }
+
+    fn move_document(
+        &self,
+        project: &Project,
+        relative_path: &Path,
+        directory: &Path,
+    ) -> Result<PathBuf, StoreError> {
+        let Some(file_name) = relative_path.file_name() else {
+            return Err(StoreError::UnsafeProjectPath(relative_path.to_owned()));
+        };
+
+        let document_path = resolve_project_path(project, relative_path)?;
+
+        if !document_path.is_file() {
+            return Err(StoreError::NotFile(document_path));
+        }
+
+        let destination = resolve_project_path(project, directory)?;
+
+        if !destination.is_dir() {
+            return Err(StoreError::NotDirectory(destination));
+        }
+
+        let moved_path = destination.join(file_name);
+
+        // `fs::rename` replaces a file already standing at the destination on
+        // Unix while refusing on Windows, so the document in the way is named
+        // here rather than left to the platform. A file that appears between
+        // this check and the rename is a race Lantern holds no lock against.
+        if moved_path.exists() {
+            return Err(StoreError::AlreadyExists(moved_path));
+        }
+
+        fs::rename(&document_path, &moved_path).map_err(|source| StoreError::Io {
+            path: moved_path,
+            source,
+        })?;
+
+        // Built from the caller's own path rather than from the resolved one,
+        // so that the document keeps the exact bytes the system reported.
+        Ok(directory.join(file_name))
+    }
+
+    fn document_order(&self, project: &Project, directory: &Path) -> Vec<String> {
+        order::read(project, directory)
+    }
+
+    fn set_document_order(
+        &self,
+        project: &Project,
+        directory: &Path,
+        names: &[String],
+    ) -> Result<(), StoreError> {
+        order::write(project, directory, names)
     }
 
     fn list_directory(
@@ -371,6 +496,12 @@ pub enum StoreError {
         #[source]
         source: ThemeError,
     },
+    /// The document order could not be written as a TOML file.
+    ///
+    /// The order is built from names storage itself reported, so this is a bug
+    /// rather than something an author can bring about.
+    #[error("the document order could not be written")]
+    OrderNotWritable,
     /// The operating system rejected a filesystem operation.
     #[error("could not access '{}': {source}", path.display())]
     Io {

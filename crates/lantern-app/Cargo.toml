@@ -6,7 +6,11 @@ edition.workspace = true
 [dependencies]
 iced.workspace = true
 lantern-service = { path = "../lantern-service" }
+png.workspace = true
 rfd.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

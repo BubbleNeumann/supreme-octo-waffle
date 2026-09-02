@@ -24,13 +24,23 @@ pub(super) fn square_button(theme: &Theme, status: button::Status) -> button::St
     }
 }
 
-pub(super) fn tree_button(theme: &Theme, status: button::Status) -> button::Style {
-    let style = button::subtle(theme, status);
+pub(super) fn tree_button(
+    theme: &Theme,
+    status: button::Status,
+    drop_target: bool,
+) -> button::Style {
+    let palette = theme.extended_palette();
+    let mut style = button::subtle(theme, status);
+    style.border = Border::default();
 
-    button::Style {
-        border: Border::default(),
-        ..style
+    // The directory a dragged document would land in, drawn the way the open
+    // document is drawn: the one row in the tree currently being acted on.
+    if drop_target {
+        style.background = Some(palette.primary.weak.color.into());
+        style.text_color = palette.primary.weak.text;
     }
+
+    style
 }
 
 pub(super) fn file_button(theme: &Theme, status: button::Status, selected: bool) -> button::Style {
@@ -47,6 +57,16 @@ pub(super) fn file_button(theme: &Theme, status: button::Status, selected: bool)
     }
 
     style
+}
+
+/// Draws the line marking where a dragged document would land.
+pub(super) fn insertion_line(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+
+    container::Style {
+        background: Some(palette.primary.base.color.into()),
+        ..container::Style::default()
+    }
 }
 
 pub(super) fn borderless_text_input(

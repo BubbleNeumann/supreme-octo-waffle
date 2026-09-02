@@ -13,7 +13,60 @@ use thiserror::Error;
 /// the same shape however the directory behind it is arranged. Anything else at
 /// the root belongs to the author rather than to Lantern, and stays out of
 /// sight rather than being moved or removed.
-pub const WORKSPACE_DIRECTORIES: [&str; 3] = ["chapters", "references", "drawer"];
+pub const WORKSPACE_DIRECTORIES: [&str; 3] = [DEFAULT_DOCUMENT_DIRECTORY, "references", "drawer"];
+
+/// The workspace directory a document is created in when nothing is open.
+///
+/// A project is opened to draft in, so a document created with no document to
+/// sit beside goes where the drafts are kept.
+pub const DEFAULT_DOCUMENT_DIRECTORY: &str = "chapters";
+
+/// The extension given to a document created without one.
+pub const DEFAULT_DOCUMENT_EXTENSION: &str = "md";
+
+/// The file extensions Lantern opens in the editor, lowercased.
+pub const EDITABLE_EXTENSIONS: [&str; 3] = [DEFAULT_DOCUMENT_EXTENSION, "markdown", "txt"];
+
+/// Returns whether a path names a document Lantern can open in the editor.
+///
+/// The extension is compared without case, because a file saved as `CHAPTER.MD`
+/// on a system that reports it that way is the same kind of document as one
+/// saved as `chapter.md`.
+pub fn has_editable_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            EDITABLE_EXTENSIONS
+                .iter()
+                .any(|editable| extension.eq_ignore_ascii_case(editable))
+        })
+}
+
+/// Returns one directory's entries with its documents in the order given.
+///
+/// Directories keep their place ahead of the documents, in the order storage
+/// listed them; an author orders a manuscript, not the shelves it sits on.
+/// Documents `order` names come first, in the order it names them, and any it
+/// does not name follow in the order they arrived in. A document added outside
+/// Lantern is therefore drawn at the end rather than not at all, and an order
+/// naming documents that have since been deleted simply has nothing to place.
+pub fn order_documents(entries: Vec<ProjectEntry>, order: &[String]) -> Vec<ProjectEntry> {
+    let (mut directories, mut documents): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(ProjectEntry::is_directory);
+
+    // A stable sort, so documents the order does not name keep the sequence
+    // storage gave them rather than being shuffled among themselves.
+    documents.sort_by_key(|entry| {
+        order
+            .iter()
+            .position(|name| name == entry.name())
+            .unwrap_or(usize::MAX)
+    });
+
+    directories.append(&mut documents);
+
+    directories
+}
 
 /// An opened Lantern project rooted at an ordinary directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +230,16 @@ impl Document {
         self.content != content
     }
 
+    /// Adopts a path that storage has moved this document to.
+    ///
+    /// Moving changes nothing else about a document: the text, its unsaved
+    /// edits and the encoding to restore are the same ones. Without this the
+    /// in-memory copy would go on naming the path the file has left, and the
+    /// next save would be written where nothing is any more.
+    pub fn record_moved(&mut self, relative_path: PathBuf) {
+        self.relative_path = relative_path;
+    }
+
     /// Adopts text that storage has written as the document's own content.
     ///
     /// Saving does not otherwise change a document, so without this the
@@ -255,36 +318,16 @@ impl ProjectName {
         let value = value.into();
         let name = value.trim();
 
-        if name.is_empty() {
-            return Err(ProjectNameError::Empty);
-        }
-
-        if matches!(name, "." | "..") || name.contains(['/', '\\']) {
-            return Err(ProjectNameError::NotSingleComponent);
-        }
-
-        if let Some(character) = name
-            .chars()
-            .find(|character| character.is_control() || "<>:\"|?*".contains(*character))
-        {
-            return Err(ProjectNameError::InvalidCharacter(character));
-        }
-
-        if name.ends_with('.') {
-            return Err(ProjectNameError::TrailingPeriod);
-        }
-
-        let device_name = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
-        let is_reserved = matches!(device_name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || device_name
-                .strip_prefix("COM")
-                .or_else(|| device_name.strip_prefix("LPT"))
-                .is_some_and(|number| {
-                    matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-                });
-
-        if is_reserved {
-            return Err(ProjectNameError::Reserved(name.to_owned()));
+        if let Err(problem) = check_name_component(name) {
+            return Err(match problem {
+                NameProblem::Empty => ProjectNameError::Empty,
+                NameProblem::NotSingleComponent => ProjectNameError::NotSingleComponent,
+                NameProblem::InvalidCharacter(character) => {
+                    ProjectNameError::InvalidCharacter(character)
+                }
+                NameProblem::TrailingPeriod => ProjectNameError::TrailingPeriod,
+                NameProblem::Reserved => ProjectNameError::Reserved(name.to_owned()),
+            });
         }
 
         Ok(Self(name.to_owned()))
@@ -314,4 +357,124 @@ pub enum ProjectNameError {
     /// The name is reserved by Windows.
     #[error("'{0}' is a reserved project name")]
     Reserved(String),
+}
+
+/// A validated single file name for a newly-created document.
+///
+/// The name always ends in one of [`EDITABLE_EXTENSIONS`], so a document that
+/// Lantern creates is a document Lantern can open again. A name that does not
+/// already carry one is given [`DEFAULT_DOCUMENT_EXTENSION`] rather than
+/// refused: titles hold periods, and `Mrs. Dalloway` is a chapter rather than a
+/// file of some unknown kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentName(String);
+
+impl DocumentName {
+    /// Validates a document file name, giving it an editable extension.
+    pub fn new(value: impl Into<String>) -> Result<Self, DocumentNameError> {
+        let value = value.into();
+        let name = value.trim();
+
+        if let Err(problem) = check_name_component(name) {
+            return Err(match problem {
+                NameProblem::Empty => DocumentNameError::Empty,
+                NameProblem::NotSingleComponent => DocumentNameError::NotSingleComponent,
+                NameProblem::InvalidCharacter(character) => {
+                    DocumentNameError::InvalidCharacter(character)
+                }
+                NameProblem::TrailingPeriod => DocumentNameError::TrailingPeriod,
+                NameProblem::Reserved => DocumentNameError::Reserved(name.to_owned()),
+            });
+        }
+
+        if has_editable_extension(Path::new(name)) {
+            return Ok(Self(name.to_owned()));
+        }
+
+        Ok(Self(format!("{name}.{DEFAULT_DOCUMENT_EXTENSION}")))
+    }
+
+    /// Returns the validated file name, extension included.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why a proposed document file name is unsafe or invalid.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DocumentNameError {
+    /// The name contained no visible characters.
+    #[error("document name cannot be empty")]
+    Empty,
+    /// The name described more than one path component.
+    #[error("document name must be a single file name")]
+    NotSingleComponent,
+    /// The name included a character that is not portable across supported systems.
+    #[error("document name contains invalid character '{0}'")]
+    InvalidCharacter(char),
+    /// Windows removes trailing periods from file names.
+    #[error("document name cannot end with a period")]
+    TrailingPeriod,
+    /// The name is reserved by Windows.
+    #[error("'{0}' is a reserved document name")]
+    Reserved(String),
+}
+
+/// Why a proposed single path component is unsafe or invalid.
+///
+/// Named separately from the public errors because the same rules govern
+/// project directories and documents, while the wording an author sees does
+/// not.
+enum NameProblem {
+    /// The name contained no visible characters.
+    Empty,
+    /// The name described more than one path component.
+    NotSingleComponent,
+    /// The name included a character that is not portable across supported systems.
+    InvalidCharacter(char),
+    /// Windows removes trailing periods from names.
+    TrailingPeriod,
+    /// The name is reserved by Windows.
+    Reserved,
+}
+
+/// Checks a trimmed name against the rules for one filesystem component.
+///
+/// The rules are the strictest of the supported systems rather than those of
+/// the one Lantern happens to be running on, so that a project created on Linux
+/// is a project that opens on Windows.
+fn check_name_component(name: &str) -> Result<(), NameProblem> {
+    if name.is_empty() {
+        return Err(NameProblem::Empty);
+    }
+
+    if matches!(name, "." | "..") || name.contains(['/', '\\']) {
+        return Err(NameProblem::NotSingleComponent);
+    }
+
+    if let Some(character) = name
+        .chars()
+        .find(|character| character.is_control() || "<>:\"|?*".contains(*character))
+    {
+        return Err(NameProblem::InvalidCharacter(character));
+    }
+
+    if name.ends_with('.') {
+        return Err(NameProblem::TrailingPeriod);
+    }
+
+    let device_name = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let is_reserved = matches!(device_name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device_name
+            .strip_prefix("COM")
+            .or_else(|| device_name.strip_prefix("LPT"))
+            .is_some_and(|number| {
+                matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            });
+
+    if is_reserved {
+        return Err(NameProblem::Reserved);
+    }
+
+    Ok(())
 }

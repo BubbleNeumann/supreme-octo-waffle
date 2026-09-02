@@ -238,3 +238,326 @@ fn refuses_to_open_a_project_that_cannot_hold_the_workspace() {
 
     assert!(service.open_project(directory.path()).is_err());
 }
+
+#[test]
+fn creates_a_document_and_opens_it_empty() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+
+    let document = service
+        .create_document(&project, Path::new("chapters"), "Chapter One")
+        .expect("document should be created");
+
+    assert_eq!(
+        document.relative_path(),
+        Path::new("chapters").join("Chapter One.md")
+    );
+    assert_eq!(document.content(), "");
+    assert!(
+        directory
+            .path()
+            .join("chapters")
+            .join("Chapter One.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_created_document_opens_again_through_the_service() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    let created = service
+        .create_document(&project, Path::new("references"), "sources.txt")
+        .expect("document should be created");
+
+    let opened = service
+        .open_document(&project, created.relative_path())
+        .expect("document should open");
+
+    assert_eq!(opened, created);
+}
+
+#[test]
+fn refuses_to_create_a_document_over_one_already_written() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    let document_path = directory.path().join("chapters").join("one.md");
+    std::fs::write(&document_path, "Chapter one").expect("document file");
+
+    let result = service.create_document(&project, Path::new("chapters"), "one.md");
+
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(&document_path).expect("read"),
+        "Chapter one"
+    );
+}
+
+#[test]
+fn refuses_a_document_name_that_is_not_a_single_file_name() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+
+    assert!(matches!(
+        service.create_document(&project, Path::new("chapters"), "../one"),
+        Err(ProjectServiceError::InvalidDocumentName(_))
+    ));
+    assert!(matches!(
+        service.create_document(&project, Path::new("chapters"), "   "),
+        Err(ProjectServiceError::InvalidDocumentName(_))
+    ));
+}
+
+#[test]
+fn a_moved_document_opens_at_the_path_it_moved_to() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    std::fs::write(
+        directory.path().join("chapters").join("one.md"),
+        "Chapter one",
+    )
+    .expect("document file");
+
+    let moved = service
+        .move_document(&project, Path::new("chapters/one.md"), Path::new("drawer"))
+        .expect("document should move");
+
+    let document = service
+        .open_document(&project, &moved)
+        .expect("document should open");
+    assert_eq!(document.content(), "Chapter one");
+    assert_eq!(document.relative_path(), Path::new("drawer").join("one.md"));
+}
+
+#[test]
+fn refuses_to_move_a_document_that_is_not_there() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+
+    assert!(
+        service
+            .move_document(&project, Path::new("chapters/gone.md"), Path::new("drawer"))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_placed_document_is_listed_where_it_was_put() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    for name in ["one.md", "two.md", "three.md"] {
+        std::fs::write(directory.path().join("chapters").join(name), name).expect("document file");
+    }
+
+    // "three.md" sorts first by name; put it back where it belongs.
+    service
+        .place_document(
+            &project,
+            Path::new("chapters/three.md"),
+            Path::new("chapters"),
+            None,
+        )
+        .expect("document should be placed");
+
+    let entries = service
+        .list_directory(&project, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["one.md", "two.md", "three.md"]
+    );
+}
+
+#[test]
+fn a_document_placed_before_another_is_listed_before_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    for name in ["one.md", "two.md"] {
+        std::fs::write(directory.path().join("chapters").join(name), name).expect("document file");
+    }
+
+    service
+        .place_document(
+            &project,
+            Path::new("chapters/two.md"),
+            Path::new("chapters"),
+            Some("one.md"),
+        )
+        .expect("document should be placed");
+
+    let entries = service
+        .list_directory(&project, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["two.md", "one.md"]
+    );
+}
+
+#[test]
+fn placing_a_document_from_another_directory_moves_it_as_well() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    std::fs::write(directory.path().join("chapters").join("one.md"), "one").expect("document file");
+    std::fs::write(directory.path().join("drawer").join("cut.md"), "cut").expect("document file");
+
+    let placed = service
+        .place_document(
+            &project,
+            Path::new("drawer/cut.md"),
+            Path::new("chapters"),
+            Some("one.md"),
+        )
+        .expect("document should be placed");
+
+    assert_eq!(placed, Path::new("chapters").join("cut.md"));
+    assert!(!directory.path().join("drawer").join("cut.md").exists());
+    let entries = service
+        .list_directory(&project, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["cut.md", "one.md"]
+    );
+}
+
+#[test]
+fn an_order_holds_across_reopening_the_project() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    for name in ["one.md", "two.md"] {
+        std::fs::write(directory.path().join("chapters").join(name), name).expect("document file");
+    }
+    service
+        .place_document(
+            &project,
+            Path::new("chapters/two.md"),
+            Path::new("chapters"),
+            Some("one.md"),
+        )
+        .expect("document should be placed");
+
+    let reopened = service
+        .open_project(directory.path())
+        .expect("project should reopen");
+
+    let entries = service
+        .list_directory(&reopened, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["two.md", "one.md"]
+    );
+}
+
+#[test]
+fn a_document_added_outside_lantern_is_listed_after_the_ordered_ones() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    for name in ["one.md", "two.md"] {
+        std::fs::write(directory.path().join("chapters").join(name), name).expect("document file");
+    }
+    service
+        .place_document(
+            &project,
+            Path::new("chapters/two.md"),
+            Path::new("chapters"),
+            Some("one.md"),
+        )
+        .expect("document should be placed");
+
+    std::fs::write(
+        directory.path().join("chapters").join("a-new-one.md"),
+        "new",
+    )
+    .expect("document written by another program");
+
+    let entries = service
+        .list_directory(&project, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["two.md", "one.md", "a-new-one.md"]
+    );
+}
+
+#[test]
+fn deleting_the_order_file_leaves_the_documents_listed_by_name() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+    for name in ["one.md", "two.md"] {
+        std::fs::write(directory.path().join("chapters").join(name), name).expect("document file");
+    }
+    service
+        .place_document(
+            &project,
+            Path::new("chapters/two.md"),
+            Path::new("chapters"),
+            Some("one.md"),
+        )
+        .expect("document should be placed");
+
+    std::fs::remove_dir_all(directory.path().join(".lantern")).expect("remove lantern state");
+
+    let entries = service
+        .list_directory(&project, Path::new("chapters"))
+        .expect("chapters should list");
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        vec!["one.md", "two.md"]
+    );
+}
+
+#[test]
+fn the_project_root_keeps_the_workspace_order() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let service = ProjectService::filesystem();
+    let project = service
+        .open_project(directory.path())
+        .expect("project should open");
+
+    let entries = service
+        .list_directory(&project, Path::new(""))
+        .expect("root should list");
+
+    assert_eq!(
+        entries.iter().map(|entry| entry.name()).collect::<Vec<_>>(),
+        WORKSPACE_DIRECTORIES
+    );
+}

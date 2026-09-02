@@ -301,3 +301,155 @@ fn refuses_to_create_a_directory_outside_the_project() {
     ));
     assert!(!directory.path().parent().unwrap().join("escaped").exists());
 }
+
+#[test]
+fn creates_an_empty_document_inside_a_project_directory() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    store
+        .create_document(&project, Path::new("chapters/one.md"))
+        .expect("document should be created");
+
+    let document_path = directory.path().join("chapters").join("one.md");
+    assert!(document_path.is_file());
+    assert_eq!(fs::read_to_string(&document_path).expect("read"), "");
+}
+
+#[test]
+fn refuses_to_create_a_document_over_an_existing_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    let document_path = directory.path().join("chapters").join("one.md");
+    fs::write(&document_path, "Chapter one").expect("document file");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    let result = store.create_document(&project, Path::new("chapters/one.md"));
+
+    assert!(matches!(result, Err(StoreError::AlreadyExists(_))));
+    assert_eq!(
+        fs::read_to_string(&document_path).expect("read"),
+        "Chapter one"
+    );
+}
+
+#[test]
+fn refuses_to_create_a_document_outside_the_project() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    assert!(matches!(
+        store.create_document(&project, Path::new("../escaped.md")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(matches!(
+        store.create_document(&project, Path::new(".lantern/notes.md")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+}
+
+#[test]
+fn refuses_to_create_a_document_in_a_directory_that_is_not_there() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    assert!(
+        store
+            .create_document(&project, Path::new("chapters/one.md"))
+            .is_err()
+    );
+}
+
+#[test]
+fn moves_a_document_into_another_directory() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    fs::create_dir(directory.path().join("drawer")).expect("drawer directory");
+    fs::write(
+        directory.path().join("chapters").join("one.md"),
+        "Chapter one",
+    )
+    .expect("document file");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    let moved = store
+        .move_document(&project, Path::new("chapters/one.md"), Path::new("drawer"))
+        .expect("document should move");
+
+    assert_eq!(moved, Path::new("drawer").join("one.md"));
+    assert!(!directory.path().join("chapters").join("one.md").exists());
+    assert_eq!(
+        fs::read_to_string(directory.path().join("drawer").join("one.md")).expect("read"),
+        "Chapter one"
+    );
+}
+
+#[test]
+fn refuses_to_move_a_document_onto_one_of_the_same_name() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    fs::create_dir(directory.path().join("drawer")).expect("drawer directory");
+    fs::write(directory.path().join("chapters").join("one.md"), "Kept").expect("document file");
+    fs::write(directory.path().join("drawer").join("one.md"), "Also kept").expect("other file");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    let result = store.move_document(&project, Path::new("chapters/one.md"), Path::new("drawer"));
+
+    assert!(matches!(result, Err(StoreError::AlreadyExists(_))));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("chapters").join("one.md")).expect("read"),
+        "Kept"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("drawer").join("one.md")).expect("read"),
+        "Also kept"
+    );
+}
+
+#[test]
+fn refuses_to_move_a_document_out_of_the_project() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("chapters")).expect("chapters directory");
+    fs::write(
+        directory.path().join("chapters").join("one.md"),
+        "Chapter one",
+    )
+    .expect("document file");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    assert!(matches!(
+        store.move_document(&project, Path::new("chapters/one.md"), Path::new("..")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(matches!(
+        store.move_document(
+            &project,
+            Path::new("chapters/one.md"),
+            Path::new(".lantern")
+        ),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(directory.path().join("chapters").join("one.md").is_file());
+}
+
+#[test]
+fn refuses_to_move_a_directory_as_though_it_were_a_document() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir_all(directory.path().join("chapters").join("act-one")).expect("directories");
+    fs::create_dir(directory.path().join("drawer")).expect("drawer directory");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    let result = store.move_document(&project, Path::new("chapters/act-one"), Path::new("drawer"));
+
+    assert!(matches!(result, Err(StoreError::NotFile(_))));
+    assert!(directory.path().join("chapters").join("act-one").is_dir());
+}
