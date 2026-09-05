@@ -5,7 +5,9 @@ use explorer::Explorer;
 use iced::futures::Stream;
 use iced::widget::{Id, operation};
 use iced::{Event, Size, Subscription, Task, event, keyboard, mouse, stream};
-use lantern_service::{DEFAULT_DOCUMENT_DIRECTORY, Document, FsProjectService, Project};
+use lantern_service::{
+    DEFAULT_DOCUMENT_DIRECTORY, Document, FsProjectService, Project, is_chapter, scene_directory,
+};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -122,12 +124,23 @@ pub(crate) enum HoveredEntry {
     Document {
         /// The document the row draws.
         relative_path: PathBuf,
-        /// Whether the pointer is in the row's top edge, meaning a document let
-        /// go here belongs before this one rather than after it.
-        above: bool,
+        /// Where in the row the pointer is, which is what a drop against it
+        /// means.
+        place: DropPlace,
     },
     /// A directory row, which a drag can be let go over.
     Directory(PathBuf),
+}
+
+/// What letting a dragged document go against a document's row asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DropPlace {
+    /// The document goes in that row's directory, ahead of the row.
+    Before,
+    /// The document goes under that row, as one of the chapter's scenes.
+    Under,
+    /// The document goes in that row's directory, after the row.
+    After,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +399,15 @@ fn apply_project_result(
 /// it, or `None` when nothing was created; a failure is reported in the sidebar
 /// and leaves the name in the field to be corrected.
 fn create_document(lantern: &mut Lantern) -> Option<PathBuf> {
+    // A document created under a chapter is one of its scenes, and the
+    // chapter's file is written from those. An open chapter has to be on disk
+    // before that happens, or it would be rebuilt around the text on disk and
+    // then saved over with the text in the editor, taking the new scene with
+    // it. Nothing else in the editor is touched by creating a document.
+    if lantern.open_document_path().is_some_and(is_chapter) {
+        save_open_document(lantern);
+    }
+
     let directory = lantern.new_document_directory().to_owned();
     let created = {
         let project = lantern.project.as_ref()?;
@@ -427,6 +449,20 @@ fn drop_dragged_document(lantern: &mut Lantern) {
         return;
     };
 
+    // A drop can rewrite the file in the editor: a chapter is written from the
+    // scenes under it, and this drop may be giving it one or taking one away.
+    // An open chapter's edits reach disk first, so that it is rebuilt around
+    // them rather than over them, and [`refresh_open_document`] reads back what
+    // the drop made of them. The document being dragged is not saved, because
+    // moving a document is not editing it: it keeps its unsaved text and is
+    // written where it lands, when the author asks.
+    if lantern
+        .open_document_path()
+        .is_some_and(|open| is_chapter(open) && open != relative_path)
+    {
+        save_open_document(lantern);
+    }
+
     match lantern.hovered_entry.clone() {
         // Let go over a directory: the document goes into it, and takes
         // whatever place that directory's order leaves it.
@@ -450,11 +486,39 @@ fn drop_dragged_document(lantern: &mut Lantern) {
 
             finish_drop(lantern, &relative_path, &directory, moved);
         }
+        // Let go over the middle of a chapter's row: the document goes under
+        // the chapter, as the last of the scenes it is written in.
+        Some(HoveredEntry::Document {
+            relative_path: hovered_path,
+            place: DropPlace::Under,
+        }) if is_chapter(&hovered_path) => {
+            let Some(directory) = scene_directory(&hovered_path) else {
+                return;
+            };
+
+            // A scene let go over the chapter it is already under has not moved.
+            if hovered_path == relative_path || relative_path.parent() == Some(directory.as_path())
+            {
+                return;
+            }
+
+            let moved = {
+                let Some(project) = lantern.project.as_ref() else {
+                    return;
+                };
+
+                lantern
+                    .project_service
+                    .move_document(project, &relative_path, &directory)
+            };
+
+            finish_drop(lantern, &relative_path, &directory, moved);
+        }
         // Let go against another document: the drop names a place in that
         // document's directory, which is recorded as the author's order.
         Some(HoveredEntry::Document {
             relative_path: hovered_path,
-            above,
+            place,
         }) => {
             if hovered_path == relative_path {
                 return;
@@ -463,7 +527,12 @@ fn drop_dragged_document(lantern: &mut Lantern) {
             let Some(directory) = hovered_path.parent().map(Path::to_owned) else {
                 return;
             };
-            let before = insertion_anchor(lantern, &directory, &hovered_path, above);
+            let before = insertion_anchor(
+                lantern,
+                &directory,
+                &hovered_path,
+                place == DropPlace::Before,
+            );
 
             let placed = {
                 let Some(project) = lantern.project.as_ref() else {
@@ -554,6 +623,46 @@ fn finish_drop(
 
     reveal_directory(lantern, directory);
     load_visible_directories(lantern);
+    refresh_open_document(lantern);
+}
+
+/// Reads the open document again when a drop has rewritten its file.
+///
+/// A chapter's file is written from the scenes under it, so a drop that gives it
+/// one or takes one away leaves what is in the editor behind. Only a chapter can
+/// be rewritten this way, and only text that has actually changed is replaced,
+/// so every other drop leaves the editor and the caret exactly as they were.
+fn refresh_open_document(lantern: &mut Lantern) {
+    let Some(relative_path) = lantern.open_document_path().map(Path::to_owned) else {
+        return;
+    };
+
+    // Text an author has not saved is theirs, and is never replaced by what is
+    // on disk - a chapter carrying edits is left alone until they are written.
+    if !is_chapter(&relative_path) || lantern.unsaved_edits {
+        return;
+    }
+
+    let Some(project) = lantern.project.as_ref() else {
+        return;
+    };
+
+    // A chapter that cannot be read again is left in the editor as it stands;
+    // the author's text is worth more than agreement with the disk.
+    let Ok(document) = lantern
+        .project_service
+        .open_document(project, &relative_path)
+    else {
+        return;
+    };
+
+    if !document.differs_from(&lantern.editor.text()) {
+        return;
+    }
+
+    lantern.editor = text_editor::Content::with_text(document.content());
+    lantern.open_document = Some(document);
+    lantern.unsaved_edits = false;
 }
 
 /// Expands the way down to a directory and has its listing read again.
@@ -570,6 +679,17 @@ fn reveal_directory(lantern: &mut Lantern, directory: &Path) {
     }
 
     lantern.explorer.forget_listing(directory);
+
+    // The directory above it too: a chapter that has just been given its first
+    // scene is a row that was not expandable when its own directory was listed.
+    // Never the root, whose listing is the one everything else is found
+    // through, and which holds the same workspace directories either way.
+    if let Some(parent) = directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        lantern.explorer.forget_listing(parent);
+    }
 }
 
 fn open_document(lantern: &mut Lantern, relative_path: &Path) -> bool {

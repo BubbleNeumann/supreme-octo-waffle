@@ -1,6 +1,6 @@
 mod caret;
 mod editor;
-mod sidebar;
+pub(crate) mod sidebar;
 mod style;
 pub(crate) mod text_editor;
 

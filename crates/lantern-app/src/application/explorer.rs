@@ -1,7 +1,7 @@
 //! Project explorer state: which directories are listed, which are expanded,
 //! and the flattened rows the sidebar draws.
 
-use lantern_service::ProjectEntry;
+use lantern_service::{ProjectEntry, is_chapter, scene_directory};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -144,17 +144,59 @@ impl Explorer {
             return;
         };
 
+        // A chapter is drawn as though it were the directory its scenes are
+        // kept in, so that directory is not drawn beside it as well.
+        let scene_directories: Vec<PathBuf> = entries
+            .iter()
+            .filter(|entry| !entry.is_directory() && is_chapter(entry.relative_path()))
+            .filter_map(|entry| scene_directory(entry.relative_path()))
+            .collect();
+        let mut chapters = 0;
+
         for entry in entries {
-            let expanded = entry.is_directory() && self.expanded.contains(entry.relative_path());
+            let chapter_number = if entry.is_directory() || !is_chapter(entry.relative_path()) {
+                None
+            } else {
+                chapters += 1;
+                Some(chapters)
+            };
+
+            let children = if entry.is_directory() {
+                if scene_directories
+                    .iter()
+                    .any(|scenes| scenes == entry.relative_path())
+                {
+                    continue;
+                }
+
+                Some(entry.relative_path().to_owned())
+            } else {
+                // A chapter with no scene directory beside it has no children
+                // to disclose; it is an ordinary document until one is dragged
+                // under it.
+                chapter_number
+                    .and_then(|_| scene_directory(entry.relative_path()))
+                    .filter(|directory| {
+                        entries.iter().any(|listed| {
+                            listed.is_directory() && listed.relative_path() == directory
+                        })
+                    })
+            };
+
+            let expanded = children
+                .as_ref()
+                .is_some_and(|children| self.expanded.contains(children));
 
             rows.push(ExplorerRow {
                 entry,
                 depth,
                 expanded,
+                children: children.clone(),
+                chapter_number,
             });
 
-            if expanded {
-                self.append_rows(entry.relative_path(), depth + 1, rows);
+            if let Some(children) = children.filter(|_| expanded) {
+                self.append_rows(&children, depth + 1, rows);
             }
         }
     }
@@ -167,6 +209,18 @@ pub(crate) struct ExplorerRow<'a> {
     pub(crate) entry: &'a ProjectEntry,
     /// How far the entry sits below the project root.
     pub(crate) depth: usize,
-    /// Whether this row is a directory that is currently expanded.
+    /// Whether this row's children are currently shown beneath it.
     pub(crate) expanded: bool,
+    /// The directory holding the rows drawn under this one, when it has any.
+    ///
+    /// A directory's own path, or the scene directory of a chapter that has
+    /// scenes. It is what expanding and collapsing this row acts on, and it is
+    /// `None` for a row nothing can be drawn beneath.
+    pub(crate) children: Option<PathBuf>,
+    /// Which chapter this row draws, counting from the top of the directory.
+    ///
+    /// `None` for everything that is not a chapter. The number is the chapter's
+    /// place in the order the author put it in rather than anything written
+    /// down, so dragging a chapter renumbers the ones it passes.
+    pub(crate) chapter_number: Option<usize>,
 }

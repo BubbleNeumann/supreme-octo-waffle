@@ -593,7 +593,7 @@ fn clicking_a_document_is_not_a_drag() {
         &mut lantern,
         Message::EntryHovered(Some(HoveredEntry::Document {
             relative_path: PathBuf::from("chapters/one.md"),
-            above: false,
+            place: DropPlace::After,
         })),
     ));
     drop(update(&mut lantern, Message::PointerPressed));
@@ -633,7 +633,7 @@ fn a_document_let_go_outside_the_explorer_does_not_move() {
         &mut lantern,
         Message::EntryHovered(Some(HoveredEntry::Document {
             relative_path: PathBuf::from("chapters/one.md"),
-            above: false,
+            place: DropPlace::After,
         })),
     ));
     drop(update(&mut lantern, Message::PointerPressed));
@@ -704,7 +704,7 @@ fn drag_document(lantern: &mut Lantern, document: &str, directory: &str) {
         lantern,
         Message::EntryHovered(Some(HoveredEntry::Document {
             relative_path: PathBuf::from(document),
-            above: false,
+            place: DropPlace::After,
         })),
     ));
     drop(update(lantern, Message::PointerPressed));
@@ -723,7 +723,12 @@ fn dragging_a_document_above_another_reorders_them() {
     let mut lantern = open_chapters(directory.path());
     assert_eq!(chapter_names(&lantern), vec!["one.md", "two.md"]);
 
-    drag_document_against(&mut lantern, "chapters/two.md", "chapters/one.md", true);
+    drag_document_against(
+        &mut lantern,
+        "chapters/two.md",
+        "chapters/one.md",
+        DropPlace::Before,
+    );
 
     assert_eq!(chapter_names(&lantern), vec!["two.md", "one.md"]);
     assert!(lantern.project_error.is_none());
@@ -742,7 +747,12 @@ fn dragging_a_document_below_another_puts_it_after_it() {
     );
 
     // Let go over the lower part of "one.md", which means after it.
-    drag_document_against(&mut lantern, "chapters/two.md", "chapters/one.md", false);
+    drag_document_against(
+        &mut lantern,
+        "chapters/two.md",
+        "chapters/one.md",
+        DropPlace::After,
+    );
 
     assert_eq!(
         chapter_names(&lantern),
@@ -756,7 +766,12 @@ fn an_order_a_drag_gave_outlasts_the_session_that_gave_it() {
     write_document(directory.path(), "chapters/one.md", "One");
     write_document(directory.path(), "chapters/two.md", "Two");
     let mut lantern = open_chapters(directory.path());
-    drag_document_against(&mut lantern, "chapters/two.md", "chapters/one.md", true);
+    drag_document_against(
+        &mut lantern,
+        "chapters/two.md",
+        "chapters/one.md",
+        DropPlace::Before,
+    );
 
     let reopened = open_chapters(directory.path());
 
@@ -770,7 +785,12 @@ fn a_document_dragged_onto_itself_changes_nothing() {
     write_document(directory.path(), "chapters/two.md", "Two");
     let mut lantern = open_chapters(directory.path());
 
-    drag_document_against(&mut lantern, "chapters/one.md", "chapters/one.md", true);
+    drag_document_against(
+        &mut lantern,
+        "chapters/one.md",
+        "chapters/one.md",
+        DropPlace::Before,
+    );
 
     assert_eq!(chapter_names(&lantern), vec!["one.md", "two.md"]);
     assert!(!directory.path().join(".lantern").exists());
@@ -789,7 +809,12 @@ fn a_document_dragged_against_one_elsewhere_moves_and_takes_that_place() {
         Message::ToggleProjectDirectory(PathBuf::from("drawer")),
     ));
 
-    drag_document_against(&mut lantern, "drawer/cut.md", "chapters/two.md", true);
+    drag_document_against(
+        &mut lantern,
+        "drawer/cut.md",
+        "chapters/two.md",
+        DropPlace::Before,
+    );
 
     assert!(!directory.path().join("drawer").join("cut.md").exists());
     assert!(directory.path().join("chapters").join("cut.md").is_file());
@@ -838,14 +863,13 @@ fn chapter_names(lantern: &Lantern) -> Vec<&str> {
 
 /// Presses over a document row and lets go against another document's row.
 ///
-/// `above` is where in that row the pointer ended up: its top edge, meaning
-/// before it, or anywhere else, meaning after it.
-fn drag_document_against(lantern: &mut Lantern, document: &str, against: &str, above: bool) {
+/// `place` is what where the pointer ended up in that row asked for.
+fn drag_document_against(lantern: &mut Lantern, document: &str, against: &str, place: DropPlace) {
     drop(update(
         lantern,
         Message::EntryHovered(Some(HoveredEntry::Document {
             relative_path: PathBuf::from(document),
-            above: false,
+            place: DropPlace::After,
         })),
     ));
     drop(update(lantern, Message::PointerPressed));
@@ -853,7 +877,7 @@ fn drag_document_against(lantern: &mut Lantern, document: &str, against: &str, a
         lantern,
         Message::EntryHovered(Some(HoveredEntry::Document {
             relative_path: PathBuf::from(against),
-            above,
+            place,
         })),
     ));
     drop(update(lantern, Message::PointerReleased));
@@ -1124,4 +1148,328 @@ fn the_window_icon_is_large_enough_to_scale_down_to_every_slot() {
     let (_, size) = icon.into_raw();
 
     assert!(size.width >= 64, "the icon is {} pixels wide", size.width);
+}
+
+/// Presses over a document row and lets go over the middle of a chapter's.
+fn drag_document_under(lantern: &mut Lantern, document: &str, chapter: &str) {
+    drag_document_against(lantern, document, chapter, DropPlace::Under);
+}
+
+/// Returns the rows drawn for the tree, as their depth and drawn name.
+fn drawn_rows(lantern: &Lantern) -> Vec<(usize, String)> {
+    lantern
+        .explorer
+        .visible_rows()
+        .into_iter()
+        .map(|row| {
+            (
+                row.depth,
+                crate::ui::sidebar::row_title(row.entry.name(), row.chapter_number).into_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_document_let_go_over_a_chapter_becomes_a_scene_under_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "");
+    write_document(directory.path(), "drawer/The station.md", "Rain.");
+    let mut lantern = open_chapters(directory.path());
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("drawer")),
+    ));
+
+    drag_document_under(&mut lantern, "drawer/The station.md", "chapters/Arrival.md");
+
+    assert!(
+        directory
+            .path()
+            .join("chapters")
+            .join("Arrival")
+            .join("The station.md")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("chapters").join("Arrival.md"))
+            .expect("chapter should be read"),
+        "Rain."
+    );
+    assert!(lantern.project_error.is_none());
+}
+
+#[test]
+fn a_chapter_that_has_scenes_is_drawn_as_the_folder_holding_them() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "chapters/Arrival/The station.md", "Rain.");
+    let mut lantern = open_chapters(directory.path());
+
+    assert_eq!(
+        drawn_rows(&lantern),
+        vec![
+            (0, "chapters".to_owned()),
+            (1, "Chapter 1. Arrival".to_owned()),
+            (0, "references".to_owned()),
+            (0, "drawer".to_owned()),
+        ]
+    );
+
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("chapters/Arrival")),
+    ));
+
+    assert_eq!(
+        drawn_rows(&lantern),
+        vec![
+            (0, "chapters".to_owned()),
+            (1, "Chapter 1. Arrival".to_owned()),
+            (2, "The station".to_owned()),
+            (0, "references".to_owned()),
+            (0, "drawer".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_chapter_carries_the_number_of_the_place_it_was_dragged_to() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/one.md", "One");
+    write_document(directory.path(), "chapters/two.md", "Two");
+    let mut lantern = open_chapters(directory.path());
+    assert_eq!(
+        drawn_rows(&lantern)[1..3],
+        [
+            (1, "Chapter 1. one".to_owned()),
+            (1, "Chapter 2. two".to_owned())
+        ]
+    );
+
+    drag_document_against(
+        &mut lantern,
+        "chapters/two.md",
+        "chapters/one.md",
+        DropPlace::Before,
+    );
+
+    assert_eq!(
+        drawn_rows(&lantern)[1..3],
+        [
+            (1, "Chapter 1. two".to_owned()),
+            (1, "Chapter 2. one".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn a_scene_is_not_numbered_as_a_chapter() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "chapters/Arrival/The station.md", "Rain.");
+    let mut lantern = open_chapters(directory.path());
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("chapters/Arrival")),
+    ));
+
+    let numbers: Vec<Option<usize>> = lantern
+        .explorer
+        .visible_rows()
+        .into_iter()
+        .map(|row| row.chapter_number)
+        .collect();
+
+    assert_eq!(numbers, vec![None, Some(1), None, None, None]);
+}
+
+#[test]
+fn a_chapter_gaining_its_first_scene_becomes_a_row_that_opens() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "");
+    write_document(directory.path(), "drawer/The station.md", "Rain.");
+    let mut lantern = open_chapters(directory.path());
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("drawer")),
+    ));
+
+    drag_document_under(&mut lantern, "drawer/The station.md", "chapters/Arrival.md");
+
+    assert_eq!(
+        drawn_rows(&lantern),
+        vec![
+            (0, "chapters".to_owned()),
+            (1, "Chapter 1. Arrival".to_owned()),
+            (2, "The station".to_owned()),
+            (0, "references".to_owned()),
+            (0, "drawer".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_scene_let_go_over_the_chapter_it_is_already_under_does_not_move() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "chapters/Arrival/The station.md", "Rain.");
+    let mut lantern = open_chapters(directory.path());
+
+    drag_document_under(
+        &mut lantern,
+        "chapters/Arrival/The station.md",
+        "chapters/Arrival.md",
+    );
+
+    assert!(
+        directory
+            .path()
+            .join("chapters")
+            .join("Arrival")
+            .join("The station.md")
+            .is_file()
+    );
+    assert!(lantern.project_error.is_none());
+}
+
+#[test]
+fn a_document_let_go_over_the_middle_of_an_ordinary_row_is_ordered_after_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "drawer/one.md", "One");
+    write_document(directory.path(), "drawer/two.md", "Two");
+    write_document(directory.path(), "drawer/three.md", "Three");
+    let mut lantern = open_chapters(directory.path());
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("drawer")),
+    ));
+
+    drag_document_against(
+        &mut lantern,
+        "drawer/two.md",
+        "drawer/one.md",
+        DropPlace::Under,
+    );
+
+    assert!(!directory.path().join("drawer").join("one").exists());
+    assert_eq!(
+        lantern
+            .explorer
+            .listing(Path::new("drawer"))
+            .expect("drawer should be listed")
+            .iter()
+            .map(|entry| entry.name())
+            .collect::<Vec<_>>(),
+        vec!["one.md", "two.md", "three.md"]
+    );
+}
+
+#[test]
+fn editing_a_chapter_writes_the_scenes_it_is_written_in() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    let scene = write_document(directory.path(), "chapters/Arrival/The station.md", "Rain.");
+    let mut lantern = open_project_document(directory.path(), "chapters/Arrival.md");
+
+    type_text(&mut lantern, "Cold ");
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(
+        std::fs::read_to_string(&scene).expect("scene should be read"),
+        "Cold Rain."
+    );
+}
+
+#[test]
+fn editing_a_scene_writes_the_chapter_it_is_under() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let chapter = write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "chapters/Arrival/The station.md", "Rain.");
+    let mut lantern = open_project_document(directory.path(), "chapters/Arrival/The station.md");
+
+    type_text(&mut lantern, "Cold ");
+    drop(update(&mut lantern, Message::SaveDocument));
+
+    assert_eq!(
+        std::fs::read_to_string(&chapter).expect("chapter should be read"),
+        "Cold Rain."
+    );
+}
+
+#[test]
+fn a_scene_dropped_under_the_open_chapter_is_read_into_the_editor() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "drawer/The house.md", "Gate.");
+    let mut lantern = open_project_document(directory.path(), "chapters/Arrival.md");
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("chapters")),
+    ));
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("drawer")),
+    ));
+
+    drag_document_under(&mut lantern, "drawer/The house.md", "chapters/Arrival.md");
+
+    assert_eq!(lantern.editor.text(), "Rain.\n--\nGate.");
+    assert!(!lantern.unsaved_edits);
+}
+
+#[test]
+fn the_edits_in_an_open_chapter_survive_a_scene_being_dropped_under_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/Arrival.md", "Rain.");
+    write_document(directory.path(), "drawer/The house.md", "Gate.");
+    let mut lantern = open_project_document(directory.path(), "chapters/Arrival.md");
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("chapters")),
+    ));
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("drawer")),
+    ));
+    type_text(&mut lantern, "Cold ");
+
+    drag_document_under(&mut lantern, "drawer/The house.md", "chapters/Arrival.md");
+
+    assert_eq!(lantern.editor.text(), "Cold Rain.\n--\nGate.");
+    assert_eq!(
+        std::fs::read_to_string(
+            directory
+                .path()
+                .join("chapters")
+                .join("Arrival")
+                .join("Arrival.md")
+        )
+        .expect("scene should be read"),
+        "Cold Rain."
+    );
+}
+
+#[test]
+fn an_open_chapter_being_reordered_keeps_the_text_it_has_not_saved() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    write_document(directory.path(), "chapters/one.md", "One");
+    write_document(directory.path(), "chapters/two.md", "Two");
+    let mut lantern = open_project_document(directory.path(), "chapters/two.md");
+    drop(update(
+        &mut lantern,
+        Message::ToggleProjectDirectory(PathBuf::from("chapters")),
+    ));
+    type_text(&mut lantern, "!");
+
+    drag_document_against(
+        &mut lantern,
+        "chapters/two.md",
+        "chapters/one.md",
+        DropPlace::Before,
+    );
+
+    assert_eq!(lantern.editor.text(), "!Two");
+    assert!(lantern.unsaved_edits);
+    assert_eq!(chapter_names(&lantern), vec!["two.md", "one.md"]);
 }

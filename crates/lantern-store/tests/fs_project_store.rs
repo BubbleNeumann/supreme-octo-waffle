@@ -453,3 +453,49 @@ fn refuses_to_move_a_directory_as_though_it_were_a_document() {
     assert!(matches!(result, Err(StoreError::NotFile(_))));
     assert!(directory.path().join("chapters").join("act-one").is_dir());
 }
+
+#[test]
+fn deletes_one_document() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("cut.md");
+    fs::write(&path, "Cut").expect("document file");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    store
+        .delete_document(&project, Path::new("cut.md"))
+        .expect("document should be deleted");
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn refuses_to_delete_a_directory_as_though_it_were_a_document() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::create_dir(directory.path().join("drawer")).expect("drawer directory");
+    let store = FsProjectStore;
+    let project = store.open_project(directory.path()).expect("open project");
+
+    assert!(matches!(
+        store.delete_document(&project, Path::new("drawer")),
+        Err(StoreError::NotFile(_))
+    ));
+    assert!(directory.path().join("drawer").is_dir());
+}
+
+#[test]
+fn refuses_to_delete_a_document_outside_the_project() {
+    let parent = tempfile::tempdir().expect("temporary directory");
+    let outside = parent.path().join("outside.md");
+    fs::write(&outside, "Outside").expect("outside file");
+    let root = parent.path().join("project");
+    fs::create_dir(&root).expect("project directory");
+    let store = FsProjectStore;
+    let project = store.open_project(&root).expect("open project");
+
+    assert!(matches!(
+        store.delete_document(&project, Path::new("../outside.md")),
+        Err(StoreError::UnsafeProjectPath(_))
+    ));
+    assert!(outside.exists());
+}

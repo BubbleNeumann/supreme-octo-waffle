@@ -1,7 +1,12 @@
 //! Domain types and invariants shared across Lantern.
 
+pub mod chapter;
 pub mod theme;
 
+pub use chapter::{
+    SCENE_SEPARATOR, is_chapter, is_scene_directory_of, join_scenes, scene_directory, split_scenes,
+    unused_scene_name,
+};
 pub use theme::{BaseColors, Color, Theme, ThemeError, ThemeMode, ThemePalette};
 
 use std::path::{Path, PathBuf};

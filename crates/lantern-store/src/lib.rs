@@ -53,6 +53,12 @@ pub trait ProjectStore {
         directory: &Path,
     ) -> Result<PathBuf, StoreError>;
 
+    /// Deletes one document inside a project.
+    ///
+    /// The path must name an ordinary file. Directories are the author's to
+    /// arrange and are never removed on their behalf.
+    fn delete_document(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError>;
+
     /// Reads the order an author has given one directory's documents.
     ///
     /// A directory that has never been ordered, and one whose recorded order
@@ -228,6 +234,19 @@ impl ProjectStore for FsProjectStore {
         // Built from the caller's own path rather than from the resolved one,
         // so that the document keeps the exact bytes the system reported.
         Ok(directory.join(file_name))
+    }
+
+    fn delete_document(&self, project: &Project, relative_path: &Path) -> Result<(), StoreError> {
+        let document_path = resolve_project_path(project, relative_path)?;
+
+        if !document_path.is_file() {
+            return Err(StoreError::NotFile(document_path));
+        }
+
+        fs::remove_file(&document_path).map_err(|source| StoreError::Io {
+            path: document_path,
+            source,
+        })
     }
 
     fn document_order(&self, project: &Project, directory: &Path) -> Vec<String> {

@@ -1,6 +1,8 @@
+//! The project explorer's sidebar: the tree of rows, and the controls above it.
+
 use super::style;
 use crate::application::explorer::ExplorerRow;
-use crate::application::{HoveredEntry, Lantern, Message};
+use crate::application::{DropPlace, HoveredEntry, Lantern, Message};
 use iced::widget::{
     button, column, container, mouse_area, row, scrollable, space, text, text_input,
 };
@@ -13,13 +15,20 @@ const COLLAPSED_SIDEBAR_WIDTH: f32 = 24.0;
 const SIDEBAR_HEADER_HEIGHT: f32 = 32.0;
 const INDENTATION_PER_LEVEL: f32 = 14.0;
 const DISCLOSURE_WIDTH: f32 = 14.0;
-/// How deep into a document row's top edge means "before this one".
+/// How deep into a document row's edges means "before this one" or "after it".
 ///
-/// A row is a little over twenty pixels tall, so this is roughly its upper
-/// third. It is deliberately less than half: most of a row means "after this
-/// one", so that a pointer crossing rows on its way down the tree does not read
-/// as an insertion above each one it passes.
+/// Roughly a third of a row at each end. Between them lies the rest of the row,
+/// which for a chapter means "under this one" and for everything else means the
+/// same as the lower band: most of an ordinary row means "after this one", so
+/// that a pointer crossing rows on its way down the tree does not read as an
+/// insertion above each one it passes.
 const INSERTION_BAND: f32 = 8.0;
+/// The height of one drawn row.
+///
+/// Fixed rather than taken from the text in it, because where in a row the
+/// pointer is decides what a drop against that row means, and a band measured
+/// from the bottom edge needs an edge that does not move.
+const ROW_HEIGHT: f32 = 24.0;
 /// The thickness of the line drawn where a dragged document would land.
 const INSERTION_LINE_HEIGHT: f32 = 2.0;
 /// Follows the open document's name while it holds edits that are not on disk.
@@ -102,14 +111,22 @@ fn project_content(lantern: &Lantern) -> iced::widget::Column<'_, Message> {
     let dragging = lantern.dragged_document.is_some();
 
     for row in lantern.explorer.visible_rows() {
+        let place = drop_place_against(lantern, row.entry.relative_path());
+        let hovered = matches!(
+            &lantern.hovered_entry,
+            Some(HoveredEntry::Document { relative_path, .. })
+                if relative_path == row.entry.relative_path()
+        );
+        // A chapter a scene would go under is marked the way a directory is,
+        // because that is what the drop does with it.
         let drop_target = dragging
-            && lantern.hovered_entry
+            && (lantern.hovered_entry
                 == Some(HoveredEntry::Directory(
                     row.entry.relative_path().to_owned(),
-                ));
-        let insertion = insertion_against(lantern, row.entry.relative_path());
+                ))
+                || place == Some(DropPlace::Under));
 
-        if insertion == Some(true) {
+        if place == Some(DropPlace::Before) {
             tree = tree.push(insertion_line());
         }
 
@@ -119,9 +136,10 @@ fn project_content(lantern: &Lantern) -> iced::widget::Column<'_, Message> {
             lantern.unsaved_edits,
             drop_target,
             dragging,
+            hovered,
         ));
 
-        if insertion == Some(false) {
+        if place == Some(DropPlace::After) {
             tree = tree.push(insertion_line());
         }
     }
@@ -223,20 +241,40 @@ fn no_project_content(lantern: &Lantern) -> iced::widget::Column<'_, Message> {
         .push(text("Create will ask for the parent folder.").size(11))
 }
 
-/// Returns whether a dragged document would land above or below a row.
+/// Returns where against a row a dragged document would land.
 ///
 /// `None` while nothing is being dragged, while the pointer is over another
 /// row, and over the dragged document's own row, which asks for nothing.
-fn insertion_against(lantern: &Lantern, row: &Path) -> Option<bool> {
+fn drop_place_against(lantern: &Lantern, row: &Path) -> Option<DropPlace> {
     let dragged = lantern.dragged_document.as_deref()?;
 
     match &lantern.hovered_entry {
         Some(HoveredEntry::Document {
             relative_path,
-            above,
-        }) if relative_path == row && relative_path != dragged => Some(*above),
+            place,
+        }) if relative_path == row && relative_path != dragged => Some(*place),
         _ => None,
     }
+}
+
+/// Returns what letting go at `y` in a document's row is asking for.
+///
+/// A row's top edge means before it and its bottom edge after it. A chapter's
+/// row has a third answer between them: let go over the middle of a chapter, a
+/// document goes under it as one of its scenes. A row that is not a chapter has
+/// nothing to go under, and most of it means "after this one", so that a
+/// pointer travelling down the tree does not read as an insertion above every
+/// row it crosses.
+fn drop_place(y: f32, chapter: bool) -> DropPlace {
+    if y < INSERTION_BAND {
+        return DropPlace::Before;
+    }
+
+    if chapter && y < ROW_HEIGHT - INSERTION_BAND {
+        return DropPlace::Under;
+    }
+
+    DropPlace::After
 }
 
 /// Draws the line a dragged document would land on.
@@ -253,15 +291,16 @@ fn entry_row<'a>(
     unsaved_edits: bool,
     drop_target: bool,
     dragging: bool,
+    hovered: bool,
 ) -> Element<'a, Message> {
     let entry = explorer_row.entry;
     let indentation = space().width(Length::Fixed(
         explorer_row.depth as f32 * INDENTATION_PER_LEVEL,
     ));
 
-    if entry.is_directory() {
-        let disclosure = if explorer_row.expanded { "▾" } else { "›" };
+    let disclosure = if explorer_row.expanded { "▾" } else { "›" };
 
+    if entry.is_directory() {
         return mouse_area(
             button(row![
                 indentation,
@@ -269,6 +308,7 @@ fn entry_row<'a>(
                 text(entry.name()).size(13),
             ])
             .width(Fill)
+            .height(Length::Fixed(ROW_HEIGHT))
             .padding([3, 0])
             .style(move |theme, status| style::tree_button(theme, status, drop_target))
             .on_press(Message::ToggleProjectDirectory(
@@ -282,44 +322,95 @@ fn entry_row<'a>(
     }
 
     let selected = open_document == Some(entry.relative_path());
-    let title = drawn_name(entry.name());
+    let chapter = explorer_row.chapter_number.is_some();
+    let title = row_title(entry.name(), explorer_row.chapter_number);
     let name: Cow<'a, str> = if selected && unsaved_edits {
         format!("{title}{UNSAVED_MARKER}").into()
     } else {
-        title.into()
+        title
+    };
+    let open = Message::OpenDocument(entry.relative_path().to_owned());
+    // A chapter a scene would go under is drawn the way the open document is,
+    // as the one row in the tree being acted on - the same mark a directory
+    // takes when a drop would land in it. A row is hovered as a whole, because
+    // a chapter's is drawn as two buttons and the pointer is only ever inside
+    // one of them.
+    let marked = selected || drop_target;
+    let style =
+        move |theme: &iced::Theme, status| style::file_button(theme, status, marked, hovered);
+
+    // A chapter that holds scenes carries its own disclosure, which has to be a
+    // separate control: one button cannot both open a document and expand it.
+    // The two are styled alike and sit against each other, so the row still
+    // reads and highlights as one.
+    let drawn = match &explorer_row.children {
+        Some(children) => row![
+            button(row![
+                indentation,
+                container(text(disclosure)).width(Length::Fixed(DISCLOSURE_WIDTH)),
+            ])
+            .height(Length::Fixed(ROW_HEIGHT))
+            .padding([3, 0])
+            .style(style)
+            .on_press(Message::ToggleProjectDirectory(children.clone())),
+            button(text(name).size(13))
+                .width(Fill)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .padding([3, 0])
+                .style(style)
+                .on_press(open),
+        ]
+        .into(),
+        None => Element::from(
+            button(row![
+                indentation,
+                space().width(Length::Fixed(DISCLOSURE_WIDTH)),
+                text(name).size(13),
+            ])
+            .width(Fill)
+            .height(Length::Fixed(ROW_HEIGHT))
+            .padding([3, 0])
+            .style(style)
+            .on_press(open),
+        ),
     };
 
-    let hovered = mouse_area(
-        button(row![
-            indentation,
-            space().width(Length::Fixed(DISCLOSURE_WIDTH)),
-            text(name).size(13),
-        ])
-        .width(Fill)
-        .padding([3, 0])
-        .style(move |theme, status| style::file_button(theme, status, selected))
-        .on_press(Message::OpenDocument(entry.relative_path().to_owned())),
-    )
-    .on_enter(Message::EntryHovered(Some(HoveredEntry::Document {
-        relative_path: entry.relative_path().to_owned(),
-        above: false,
-    })));
+    let drawn_row =
+        mouse_area(drawn).on_enter(Message::EntryHovered(Some(HoveredEntry::Document {
+            relative_path: entry.relative_path().to_owned(),
+            place: DropPlace::After,
+        })));
 
     // Where in the row the pointer is only matters while a document is being
     // carried, and asking for it costs a message on every mouse move, so the
     // row reports its position only while there is a drag to place.
     if !dragging {
-        return hovered.into();
+        return drawn_row.into();
     }
 
-    hovered
-        .on_move(|point| {
+    drawn_row
+        .on_move(move |point| {
             Message::EntryHovered(Some(HoveredEntry::Document {
                 relative_path: entry.relative_path().to_owned(),
-                above: point.y < INSERTION_BAND,
+                place: drop_place(point.y, chapter),
             }))
         })
         .into()
+}
+
+/// Returns the name a document's row is drawn under.
+///
+/// A chapter is drawn under the number of the place it stands in, which is
+/// where its author dragged it to rather than anything written in its name.
+/// Dragging a chapter past another therefore renumbers both, and nothing on
+/// disk is renamed.
+pub(crate) fn row_title(entry_name: &str, chapter_number: Option<usize>) -> Cow<'_, str> {
+    let title = drawn_name(entry_name);
+
+    match chapter_number {
+        Some(number) => format!("Chapter {number}. {title}").into(),
+        None => title.into(),
+    }
 }
 
 /// Returns the name a file is drawn under: its own, without the extension.
@@ -363,5 +454,34 @@ mod tests {
     #[test]
     fn a_name_carrying_no_extension_is_drawn_whole() {
         assert_eq!(drawn_name("LICENSE"), "LICENSE");
+    }
+
+    #[test]
+    fn a_chapter_is_drawn_under_the_number_of_its_place() {
+        assert_eq!(row_title("Arrival.md", Some(1)), "Chapter 1. Arrival");
+        assert_eq!(row_title("Arrival.md", Some(12)), "Chapter 12. Arrival");
+    }
+
+    #[test]
+    fn a_document_that_is_not_a_chapter_is_drawn_under_its_title_alone() {
+        assert_eq!(row_title("The station.md", None), "The station");
+    }
+
+    #[test]
+    fn the_top_of_a_row_means_before_it_and_the_rest_after_it() {
+        assert_eq!(drop_place(0.0, false), DropPlace::Before);
+        assert_eq!(drop_place(INSERTION_BAND - 0.1, false), DropPlace::Before);
+        assert_eq!(drop_place(INSERTION_BAND, false), DropPlace::After);
+        assert_eq!(drop_place(ROW_HEIGHT, false), DropPlace::After);
+    }
+
+    #[test]
+    fn the_middle_of_a_chapters_row_means_under_it() {
+        assert_eq!(drop_place(0.0, true), DropPlace::Before);
+        assert_eq!(drop_place(ROW_HEIGHT / 2.0, true), DropPlace::Under);
+        assert_eq!(
+            drop_place(ROW_HEIGHT - INSERTION_BAND, true),
+            DropPlace::After
+        );
     }
 }

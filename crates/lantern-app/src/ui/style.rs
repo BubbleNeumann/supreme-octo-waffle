@@ -43,15 +43,23 @@ pub(super) fn tree_button(
     style
 }
 
-pub(super) fn file_button(theme: &Theme, status: button::Status, selected: bool) -> button::Style {
+pub(super) fn file_button(
+    theme: &Theme,
+    status: button::Status,
+    selected: bool,
+    hovered: bool,
+) -> button::Style {
     let palette = theme.extended_palette();
     let mut style = button::subtle(theme, status);
     style.border = Border::default();
 
+    // `hovered` is the pointer being anywhere in the row rather than over this
+    // control: a chapter's row is drawn as two buttons against each other, and
+    // half a row lighting up would not read as one row.
     if selected {
         style.background = Some(palette.primary.weak.color.into());
         style.text_color = palette.primary.weak.text;
-    } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+    } else if hovered || matches!(status, button::Status::Hovered | button::Status::Pressed) {
         style.background = Some(palette.background.weak.color.into());
         style.text_color = palette.background.weak.text;
     }
